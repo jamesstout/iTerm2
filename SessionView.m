@@ -34,6 +34,8 @@
 #import "MovePaneController.h"
 #import "PSMTabDragAssistant.h"
 #import "SessionTitleView.h"
+#import "iTermApplicationDelegate.h"  // For DLog
+#import "FutureMethods.h"
 
 static const float kTargetFrameRate = 1.0/60.0;
 static int nextViewId;
@@ -258,7 +260,17 @@ static NSDate* lastResizeDate_;
 - (void)rightMouseDown:(NSEvent*)event
 {
     if (!splitSelectionView_) {
+        static int inme;
+        if (inme) {
+            // Avoid infinite recursion. Not quite sure why this happens, but a call
+            // to -[PTYTextView rightMouseDown:] will sometimes (after a
+            // few steps through the OS) bring you back here. It happens when randomly touching
+            // a bunch of fingers on the trackpad.
+            return;
+        }
+        ++inme;
         [[[self session] TEXTVIEW] rightMouseDown:event];
+        --inme;
     }
 }
 
@@ -278,16 +290,26 @@ static NSDate* lastResizeDate_;
     // A click on the very top of the screen while in full screen mode may not be
     // in any subview!
     NSPoint p = [NSEvent mouseLocation];
-    NSPoint basePoint = [[self window] convertScreenToBase:p];
-    NSPoint relativePoint = [self convertPointFromBase:basePoint];
-    if (title_ && NSPointInRect(relativePoint, [title_ frame])) {
+    NSPoint pointInSessionView;
+    if (IsLionOrLater()) {
+        NSRect windowRect = [self futureConvertRectFromScreen:NSMakeRect(p.x, p.y, 0, 0)];
+        pointInSessionView = [self convertRect:windowRect fromView:nil].origin;
+        DLog(@"Point in screen coords=%@, point in window coords=%@, point in session view=%@",
+             NSStringFromPoint(p),
+             NSStringFromPoint(windowRect.origin),
+             NSStringFromPoint(pointInSessionView));
+    } else {
+        NSPoint basePoint = [[self window] convertScreenToBase:p];
+        pointInSessionView = [self convertPointFromBase:basePoint];
+    }
+    if (title_ && NSPointInRect(pointInSessionView, [title_ frame])) {
         [title_ mouseDown:event];
         --inme;
         return;
     }
     if (splitSelectionView_) {
         [splitSelectionView_ mouseDown:event];
-    } else if (NSPointInRect(relativePoint, [[[self session] SCROLLVIEW] frame]) &&
+    } else if (NSPointInRect(pointInSessionView, [[[self session] SCROLLVIEW] frame]) &&
                [[[self session] TEXTVIEW] mouseDownImpl:event]) {
         [super mouseDown:event];
     }
@@ -469,7 +491,7 @@ static NSDate* lastResizeDate_;
         [[MovePaneController sharedInstance] isMovingSession:[self session]]) {
         return NSDragOperationMove;
     }
-    NSPoint point = [self convertPointFromBase:[sender draggingLocation]];
+    NSPoint point = [self convertPoint:[sender draggingLocation] fromView:nil];
     [splitSelectionView_ updateAtPoint:point];
     return NSDragOperationMove;
 }

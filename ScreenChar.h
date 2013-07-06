@@ -30,6 +30,7 @@
  */
 
 #import <Cocoa/Cocoa.h>
+#import "NSStringITerm.h"
 
 // This is used in the rightmost column when a double-width character would
 // have been split in half and was wrapped to the next line. It is nonprintable
@@ -43,8 +44,8 @@
 // copy-pasting.
 #define TAB_FILLER 0xf001
 
-// If a private-use character is received as input, we convert it to this
-// meaningless character.
+// If DWC_SKIP appears in the input, we convert it to this to avoid causing confusion.
+// NOTE: I think this isn't used because DWC_SKIP is caught early and converted to a '?'.
 #define BOGUS_CHAR 0xf002
 
 // Double-width characters have their "real" code in one cell and this code in
@@ -57,15 +58,12 @@
 #define EOL_SOFT 1 // Soft line break (a long line was wrapped)
 #define EOL_DWC  2 // Double-width character wrapped to next line
 
-// The range of private codes we use, with specific instances defined right
+// The range of private codes we use, with specific instances defined
 // above here.
 #define ITERM2_PRIVATE_BEGIN 0xf000
-#define ITERM2_PRIVATE_END 0xf8fe
+#define ITERM2_PRIVATE_END 0xf003
 
-// This is the standard unicode replacement character for when input couldn't
-// be parsed properly but we need to render something there.
-#define UNKNOWN 0xfffd
-#define ONECHAR_UNKNOWN ('#')   // Used for encodings other than utf-8.
+#define ONECHAR_UNKNOWN ('?')   // Relacement character for encodings other than utf-8.
 
 // Alternate semantics definitions
 // Default background color
@@ -125,18 +123,19 @@ typedef struct screen_char_t
     // and may be rendered as some combination of font choice and color
     // intensity.
     unsigned int bold : 1;
+    unsigned int italic : 1;
     unsigned int blink : 1;
     unsigned int underline : 1;
-   
-    // These bits aren't used by are defined here so that the entire memory
+
+    // These bits aren't used but are defined here so that the entire memory
     // region can be initialized.
-    unsigned int unused : 26;
+    unsigned int unused : 25;
 } screen_char_t;
 
 // Standard unicode replacement string. Is a double-width character.
 static inline NSString* ReplacementString()
 {
-    const unichar kReplacementCharacter = 0xfffd;
+    const unichar kReplacementCharacter = UNICODE_REPLACEMENT_CHAR;
     return [NSString stringWithCharacters:&kReplacementCharacter length:1];
 }
 
@@ -146,6 +145,7 @@ static inline void CopyForegroundColor(screen_char_t* to, const screen_char_t fr
     to->foregroundColor = from.foregroundColor;
     to->alternateForegroundSemantics = from.alternateForegroundSemantics;
     to->bold = from.bold;
+    to->italic = from.italic;
     to->blink = from.blink;
     to->underline = from.underline;
 }
@@ -172,6 +172,7 @@ static inline BOOL ForegroundColorsEqual(const screen_char_t a,
     return a.foregroundColor == b.foregroundColor &&
            a.alternateForegroundSemantics == b.alternateForegroundSemantics &&
            a.bold == b.bold &&
+           a.italic == b.italic &&
            a.blink == b.blink &&
            a.underline == b.underline;
 }
@@ -235,3 +236,5 @@ NSString* ScreenCharArrayToStringDebug(screen_char_t* screenChars,
 
 // Convert an array of chars to a string, quickly.
 NSString* CharArrayToString(unichar* charHaystack, int o);
+
+void DumpScreenCharArray(screen_char_t* screenChars, int lineLength);

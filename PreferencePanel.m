@@ -517,10 +517,13 @@ static float versionNumber;
     return [self _dirIsWritable:[defaultPrefsCustomFolder stringByExpandingTildeInPath]];
 }
 
+- (BOOL)_stringIsUrlLike:(NSString *)theString {
+    return [theString hasPrefix:@"http://"] || [theString hasPrefix:@"https://"];
+}
+
 - (void)_updatePrefsDirWarning
 {
-    if (([defaultPrefsCustomFolder hasPrefix:@"http://"] ||
-         [defaultPrefsCustomFolder hasPrefix:@"https://"]) &&
+    if ([self _stringIsUrlLike:defaultPrefsCustomFolder] &&
         [NSURL URLWithString:defaultPrefsCustomFolder]) {
         // Don't warn about URLs, too expensive to check
         [prefsDirWarning setHidden:YES];
@@ -1314,7 +1317,7 @@ static float versionNumber;
     [prefs setBool:defaultThreeFingerEmulatesMiddle forKey:@"ThreeFingerEmulates"];
     [prefs setBool:defaultHideTab forKey:@"HideTab"];
     [prefs setInteger:defaultWindowStyle forKey:@"WindowStyle"];
-	[prefs setInteger:defaultOpenTmuxWindowsIn forKey:@"OpenTmuxWindowsIn"];
+        [prefs setInteger:defaultOpenTmuxWindowsIn forKey:@"OpenTmuxWindowsIn"];
     [prefs setBool:defaultAutoHideTmuxClientSession forKey:@"AutoHideTmuxClientSession"];
     [prefs setInteger:defaultTabViewType forKey:@"TabViewType"];
     [prefs setBool:defaultPromptOnQuit forKey:@"PromptOnQuit"];
@@ -1336,7 +1339,7 @@ static float versionNumber;
     [prefs setFloat:defaultStrokeThickness forKey:@"HiddenAFRStrokeThickness"];
     [prefs setObject:defaultWordChars forKey: @"WordCharacters"];
     [prefs setObject:[NSNumber numberWithInt:defaultTmuxDashboardLimit]
-			  forKey:@"TmuxDashboardLimit"];
+                          forKey:@"TmuxDashboardLimit"];
     [prefs setBool:defaultOpenBookmark forKey:@"OpenBookmark"];
     [prefs setObject:[dataSource rawData] forKey: @"New Bookmarks"];
     [prefs setBool:defaultQuitWhenAllWindowsClosed forKey:@"QuitWhenAllWindowsClosed"];
@@ -1453,7 +1456,7 @@ static float versionNumber;
         [openArrangementAtStartup setState:NO];
     }
     [hotkey setState: defaultHotkey?NSOnState:NSOffState];
-    if (defaultHotkeyCode) {
+    if (defaultHotkeyCode || defaultHotkeyChar) {
         [hotkeyField setStringValue:[iTermKeyBindingMgr formatKeyCombination:[NSString stringWithFormat:@"0x%x-0x%x", defaultHotkeyChar, defaultHotkeyModifiers]]];
     } else {
         [hotkeyField setStringValue:@""];
@@ -1587,6 +1590,21 @@ static float versionNumber;
     [[ProfileModel sharedInstance] addBookmark:dict];
 }
 
+- (BOOL)choosePrefsCustomFolder {
+    NSOpenPanel* panel = [NSOpenPanel openPanel];
+    [panel setCanChooseFiles:NO];
+    [panel setCanChooseDirectories:YES];
+    [panel setAllowsMultipleSelection:NO];
+
+    if ([panel runModal] == NSOKButton) {
+        [prefsCustomFolder setStringValue:[panel directory]];
+        [self settingChanged:prefsCustomFolder];
+        return YES;
+    }  else {
+        return NO;
+    }
+}
+
 - (IBAction)settingChanged:(id)sender
 {
     if (sender == lionStyleFullscreen) {
@@ -1597,16 +1615,17 @@ static float versionNumber;
             // Just turned it on.
             if ([[prefsCustomFolder stringValue] length] == 0) {
                 // Field was initially empty so browse for a dir.
-                [self browseCustomFolder:nil];
-            }
-            if ([prefsDirWarning isHidden]) {
-                // The directory is valid and it's probably the user's first time downt this path.
-                if ([[NSAlert alertWithMessageText:@"Copy local preferences to custom folder now?"
-                                 defaultButton:@"Copy"
-                               alternateButton:@"Don't Copy"
-                                   otherButton:nil
-                         informativeTextWithFormat:@""] runModal] == NSOKButton) {
-                    [self pushToCustomFolder:nil];
+                if ([self choosePrefsCustomFolder]) {
+                    // User didn't hit cancel; if he chose a writable directory ask if he wants to write to it.
+                    if ([self _prefsDirIsWritable]) {
+                        if ([[NSAlert alertWithMessageText:@"Copy local preferences to custom folder now?"
+                                         defaultButton:@"Copy"
+                                       alternateButton:@"Don't Copy"
+                                           otherButton:nil
+                                 informativeTextWithFormat:@""] runModal] == NSOKButton) {
+                            [self pushToCustomFolder:nil];
+                        }
+                    }
                 }
             }
         }
@@ -1637,7 +1656,7 @@ static float versionNumber;
         sender == animateDimming ||
         sender == dimOnlyText ||
         sender == dimmingAmount ||
-		sender == openTmuxWindows ||
+                sender == openTmuxWindows ||
         sender == threeFingerEmulatesMiddle ||
         sender == autoHideTmuxClientSession ||
         sender == showWindowBorder) {
@@ -1750,7 +1769,7 @@ static float versionNumber;
         defaultOpenBookmark = ([openBookmark state] == NSOnState);
         [defaultWordChars release];
         defaultWordChars = [[wordChars stringValue] retain];
-		defaultTmuxDashboardLimit = [[tmuxDashboardLimit stringValue] intValue];
+                defaultTmuxDashboardLimit = [[tmuxDashboardLimit stringValue] intValue];
         defaultQuitWhenAllWindowsClosed = ([quitWhenAllWindowsClosed state] == NSOnState);
         defaultCheckUpdate = ([checkUpdate state] == NSOnState);
         defaultSmartPlacement = ([smartPlacement state] == NSOnState);
@@ -1766,7 +1785,8 @@ static float versionNumber;
         defaultHotkey = ([hotkey state] == NSOnState);
         if (defaultHotkey != oldDefaultHotkey) {
             if (defaultHotkey) {
-                [[iTermController sharedInstance] registerHotkey:defaultHotkeyCode modifiers:defaultHotkeyModifiers];
+                // Hotkey was enabled but might be unassigned; give it a default value if needed.
+                [self sanityCheckHotKey];
             } else {
                 [[iTermController sharedInstance] unregisterHotkey];
             }
@@ -1905,7 +1925,7 @@ static float versionNumber;
 
 - (int)openTmuxWindowsIn
 {
-	return defaultOpenTmuxWindowsIn;
+        return defaultOpenTmuxWindowsIn;
 }
 
 - (BOOL)autoHideTmuxClientSession
@@ -1915,7 +1935,7 @@ static float versionNumber;
 
 - (int)tmuxDashboardLimit
 {
-	return defaultTmuxDashboardLimit;
+        return defaultTmuxDashboardLimit;
 }
 
 - (BOOL)promptOnQuit
@@ -2120,6 +2140,11 @@ static float versionNumber;
     return defaultHotkey;
 }
 
+- (short)hotkeyChar
+{
+    return defaultHotkeyChar;
+}
+
 - (int)hotkeyCode
 {
     return defaultHotkeyCode;
@@ -2203,13 +2228,11 @@ static float versionNumber;
 {
     NSString *folder = [prefs objectForKey:@"PrefsCustomFolder"] ? [prefs objectForKey:@"PrefsCustomFolder"] : @"";
     NSString *filename = [self _prefsFilenameWithBaseDir:folder];
-    if ([folder hasPrefix:@"http://"] ||
-        [folder hasPrefix:@"https://"]) {
-
+    if ([self _stringIsUrlLike:folder]) {
         filename = folder;
     } else {
-		filename = [filename stringByExpandingTildeInPath];
-	}
+                filename = [filename stringByExpandingTildeInPath];
+        }
     return filename;
 }
 
@@ -2221,8 +2244,7 @@ static float versionNumber;
     }
     NSString *filename = [self remotePrefsLocation];
     NSDictionary *remotePrefs;
-    if ([filename hasPrefix:@"http://"] ||
-        [filename hasPrefix:@"https://"]) {
+    if ([self _stringIsUrlLike:filename]) {
         // Download the URL's contents.
         NSURL *url = [NSURL URLWithString:filename];
         const NSTimeInterval kFetchTimeout = 5.0;
@@ -2273,6 +2295,19 @@ static float versionNumber;
     return [[NSUserDefaults standardUserDefaults] objectForKey:@"LoadPrefsFromCustomFolder"] ? [[[NSUserDefaults standardUserDefaults] objectForKey:@"LoadPrefsFromCustomFolder"] boolValue] : NO;
 }
 
+- (BOOL)preferenceKeyIsSyncable:(NSString *)key
+{
+    NSArray *exemptKeys = [NSArray arrayWithObjects:@"LoadPrefsFromCustomFolder",
+                           @"PrefsCustomFolder",
+                           @"iTerm Version",
+                           nil];
+    return ![exemptKeys containsObject:key] &&
+           ![key hasPrefix:@"NS"] &&
+           ![key hasPrefix:@"SU"] &&
+           ![key hasPrefix:@"NoSync"] &&
+           ![key hasPrefix:@"UK"];
+}
+
 - (BOOL)loadPrefs
 {
     static BOOL done;
@@ -2290,26 +2325,14 @@ static float versionNumber;
     if (remotePrefs && [remotePrefs count]) {
         NSDictionary *localPrefs = [NSDictionary dictionaryWithContentsOfFile:[self _prefsFilename]];
         // Empty out the current prefs
-        NSArray *exemptKeys = [NSArray arrayWithObjects:@"LoadPrefsFromCustomFolder",
-                               @"PrefsCustomFolder", @"iTerm Version", nil];
         for (NSString *key in localPrefs) {
-            if (![exemptKeys containsObject:key] &&
-                ![key hasPrefix:@"NS"] && 
-                ![key hasPrefix:@"SU"] &&
-                ![key hasPrefix:@"NoSync"] &&
-                ![key hasPrefix:@"UK"]) {
-
+            if ([self preferenceKeyIsSyncable:key]) {
                 [[NSUserDefaults standardUserDefaults] removeObjectForKey:key];
             }
         }
 
         for (NSString *key in remotePrefs) {
-            if (![exemptKeys containsObject:key] &&
-                ![key hasPrefix:@"NS"] && 
-                ![key hasPrefix:@"SU"] &&
-                ![key hasPrefix:@"NoSync"] &&
-                ![key hasPrefix:@"UK"]) {
-
+            if ([self preferenceKeyIsSyncable:key]) {
                 [[NSUserDefaults standardUserDefaults] setObject:[remotePrefs objectForKey:key]
                                                           forKey:key];
             }
@@ -2333,32 +2356,20 @@ static float versionNumber;
     }
     NSDictionary *remotePrefs = [self _remotePrefs];
     if (remotePrefs && [remotePrefs count]) {
-        NSDictionary *localPrefs = [prefs dictionaryRepresentation];
+        // Grab all prefs from our bundle only (no globals, etc.).
+        NSDictionary *localPrefs = [prefs persistentDomainForName:[[NSBundle mainBundle] bundleIdentifier]];
         // Iterate over each set of prefs and validate that the other has the same value for each key.
-        NSArray *exemptKeys = [NSArray arrayWithObjects:@"LoadPrefsFromCustomFolder",
-                               @"PrefsCustomFolder", @"iTerm Version", nil];
-
         for (NSString *key in localPrefs) {
-            if (![exemptKeys containsObject:key]) {
-                if (![key hasPrefix:@"NS"] &&
-                    ![key hasPrefix:@"SU"] &&
-                    ![key hasPrefix:@"NoSync"] &&
-                    ![key hasPrefix:@"UK"] &&
-                    ![[remotePrefs objectForKey:key] isEqual:[localPrefs objectForKey:key]]) {
-                    return YES;
-                }
+            if ([self preferenceKeyIsSyncable:key] &&
+                ![[remotePrefs objectForKey:key] isEqual:[localPrefs objectForKey:key]]) {
+                return YES;
             }
         }
 
         for (NSString *key in remotePrefs) {
-            if (![exemptKeys containsObject:key]) {
-                if (![key hasPrefix:@"NS"] &&
-                    ![key hasPrefix:@"SU"] &&
-                    ![key hasPrefix:@"NoSync"] &&
-                    ![key hasPrefix:@"UK"] &&
-                    ![[remotePrefs objectForKey:key] isEqual:[localPrefs objectForKey:key]]) {
-                    return YES;
-                }
+            if ([self preferenceKeyIsSyncable:key] &&
+                ![[remotePrefs objectForKey:key] isEqual:[localPrefs objectForKey:key]]) {
+                return YES;
             }
         }
         return NO;
@@ -2443,6 +2454,7 @@ static float versionNumber;
     NSString* handlerId = (NSString*) LSCopyDefaultHandlerForURLScheme((CFStringRef) url);
     if ([handlerId isEqualToString:@"com.googlecode.iterm2"] ||
         [handlerId isEqualToString:@"net.sourceforge.iterm"]) {
+        CFRelease(handlerId);
         NSString* guid = [urlHandlersByGuid objectForKey:url];
         if (!guid) {
             return nil;
@@ -2453,6 +2465,9 @@ static float versionNumber;
         }
         return [dataSource profileAtIndex:theIndex];
     } else {
+        if (handlerId) {
+            CFRelease(handlerId);
+        }
         return nil;
     }
 }
@@ -2846,13 +2861,15 @@ static float versionNumber;
         [useBrightBold setState:NSOnState];
     }
 
+    [useItalicFont setState:[[dict objectForKey:KEY_USE_ITALIC_FONT] boolValue] ? NSOnState : NSOffState];
+
     [transparency setFloatValue:[[dict objectForKey:KEY_TRANSPARENCY] floatValue]];
-	if ([dict objectForKey:KEY_BLEND]) {
-	  [blend setFloatValue:[[dict objectForKey:KEY_BLEND] floatValue]];
-	} else {
-		// Old clients used transparency for blending
-		[blend setFloatValue:[[dict objectForKey:KEY_TRANSPARENCY] floatValue]];
-	}
+        if ([dict objectForKey:KEY_BLEND]) {
+          [blend setFloatValue:[[dict objectForKey:KEY_BLEND] floatValue]];
+        } else {
+                // Old clients used transparency for blending
+                [blend setFloatValue:[[dict objectForKey:KEY_TRANSPARENCY] floatValue]];
+        }
     [blurRadius setFloatValue:[dict objectForKey:KEY_BLUR_RADIUS] ? [[dict objectForKey:KEY_BLUR_RADIUS] floatValue] : 2.0];
     [blur setState:[[dict objectForKey:KEY_BLUR] boolValue] ? NSOnState : NSOffState];
     if ([dict objectForKey:KEY_ASCII_ANTI_ALIASED]) {
@@ -2872,10 +2889,11 @@ static float versionNumber;
     [backgroundImage setState:[imageFilename length] > 0 ? NSOnState : NSOffState];
     [backgroundImagePreview setImage:[[[NSImage alloc] initByReferencingFile:imageFilename] autorelease]];
     backgroundImageFilename = imageFilename;
+    [backgroundImageTiled setState:[[dict objectForKey:KEY_BACKGROUND_IMAGE_TILED] boolValue] ? NSOnState : NSOffState];
 
     // Terminal tab
     [disableWindowResizing setState:[[dict objectForKey:KEY_DISABLE_WINDOW_RESIZING] boolValue] ? NSOnState : NSOffState];
-	[hideAfterOpening setState:[[dict objectForKey:KEY_HIDE_AFTER_OPENING] boolValue] ? NSOnState : NSOffState];
+        [hideAfterOpening setState:[[dict objectForKey:KEY_HIDE_AFTER_OPENING] boolValue] ? NSOnState : NSOffState];
     [syncTitle setState:[[dict objectForKey:KEY_SYNC_TITLE] boolValue] ? NSOnState : NSOffState];
     [closeSessionsOnEnd setState:[[dict objectForKey:KEY_CLOSE_SESSIONS_ON_END] boolValue] ? NSOnState : NSOffState];
     [nonAsciiDoubleWidth setState:[[dict objectForKey:KEY_AMBIGUOUS_DOUBLE_WIDTH] boolValue] ? NSOnState : NSOffState];
@@ -2884,6 +2902,7 @@ static float versionNumber;
     [flashingBell setState:[[dict objectForKey:KEY_FLASHING_BELL] boolValue] ? NSOnState : NSOffState];
     [xtermMouseReporting setState:[[dict objectForKey:KEY_XTERM_MOUSE_REPORTING] boolValue] ? NSOnState : NSOffState];
     [disableSmcupRmcup setState:[[dict objectForKey:KEY_DISABLE_SMCUP_RMCUP] boolValue] ? NSOnState : NSOffState];
+    [allowTitleReporting setState:[[dict objectForKey:KEY_ALLOW_TITLE_REPORTING] boolValue] ? NSOnState : NSOffState];
     [disablePrinting setState:[[dict objectForKey:KEY_DISABLE_PRINTING] boolValue] ? NSOnState : NSOffState];
     [scrollbackWithStatusBar setState:[[dict objectForKey:KEY_SCROLLBACK_WITH_STATUS_BAR] boolValue] ? NSOnState : NSOffState];
     [scrollbackInAlternateScreen setState:[dict objectForKey:KEY_SCROLLBACK_IN_ALTERNATE_SCREEN] ? 
@@ -2905,6 +2924,7 @@ static float versionNumber;
     [terminalType setStringValue:[dict objectForKey:KEY_TERMINAL_TYPE]];
     [sendCodeWhenIdle setState:[[dict objectForKey:KEY_SEND_CODE_WHEN_IDLE] boolValue] ? NSOnState : NSOffState];
     [idleCode setIntValue:[[dict objectForKey:KEY_IDLE_CODE] intValue]];
+    [useCanonicalParser setState:[[dict objectForKey:KEY_USE_CANONICAL_PARSER] boolValue] ? NSOnState : NSOffState];
 
     // Keyboard tab
     int rowIndex = [keyMappings selectedRow];
@@ -3085,15 +3105,7 @@ static float versionNumber;
 
 - (IBAction)browseCustomFolder:(id)sender
 {
-    NSOpenPanel* panel = [NSOpenPanel openPanel];
-    [panel setCanChooseFiles:NO];
-    [panel setCanChooseDirectories:YES];
-    [panel setAllowsMultipleSelection:NO];
-
-    if ([panel runModal] == NSOKButton) {
-        [prefsCustomFolder setStringValue:[panel directory]];
-        [self settingChanged:prefsCustomFolder];
-    }
+    [self choosePrefsCustomFolder];
 }
 
 - (BOOL)customFolderChanged
@@ -3115,8 +3127,7 @@ static float versionNumber;
     [self savePreferences];
     NSDictionary *myDict = [[NSUserDefaults standardUserDefaults] persistentDomainForName:[[NSBundle mainBundle] bundleIdentifier]];
     BOOL isOk;
-    if ([filename hasPrefix:@"http://"] ||
-        [filename hasPrefix:@"https://"]) {
+    if ([self _stringIsUrlLike:filename]) {
         [[NSAlert alertWithMessageText:@"Sorry, preferences cannot be copied to a URL by iTerm2."
                          defaultButton:@"OK"
                        alternateButton:nil
@@ -3290,6 +3301,7 @@ static float versionNumber;
     [newDict setObject:[NSNumber numberWithInt:[[cursorType selectedCell] tag]] forKey:KEY_CURSOR_TYPE];
     [newDict setObject:[NSNumber numberWithBool:([useBoldFont state]==NSOnState)] forKey:KEY_USE_BOLD_FONT];
     [newDict setObject:[NSNumber numberWithBool:([useBrightBold state]==NSOnState)] forKey:KEY_USE_BRIGHT_BOLD];
+    [newDict setObject:[NSNumber numberWithBool:([useItalicFont state]==NSOnState)] forKey:KEY_USE_ITALIC_FONT];
     [newDict setObject:[NSNumber numberWithFloat:[transparency floatValue]] forKey:KEY_TRANSPARENCY];
     [newDict setObject:[NSNumber numberWithFloat:[blend floatValue]] forKey:KEY_BLEND];
     [newDict setObject:[NSNumber numberWithFloat:[blurRadius floatValue]] forKey:KEY_BLUR_RADIUS];
@@ -3300,8 +3312,8 @@ static float versionNumber;
 
     if (sender == backgroundImage) {
         NSString* filename = nil;
-                if ([sender state] == NSOnState) {
-                        filename = [self _chooseBackgroundImage];
+        if ([sender state] == NSOnState) {
+            filename = [self _chooseBackgroundImage];
         }
         if (!filename) {
                         [backgroundImagePreview setImage: nil];
@@ -3310,6 +3322,7 @@ static float versionNumber;
         backgroundImageFilename = filename;
     }
     [newDict setObject:backgroundImageFilename forKey:KEY_BACKGROUND_IMAGE_LOCATION];
+    [newDict setObject:[NSNumber numberWithBool:([backgroundImageTiled state]==NSOnState)] forKey:KEY_BACKGROUND_IMAGE_TILED];
 
     // Terminal tab
     [newDict setObject:[NSNumber numberWithBool:([disableWindowResizing state]==NSOnState)] forKey:KEY_DISABLE_WINDOW_RESIZING];
@@ -3322,6 +3335,7 @@ static float versionNumber;
     [newDict setObject:[NSNumber numberWithBool:([flashingBell state]==NSOnState)] forKey:KEY_FLASHING_BELL];
     [newDict setObject:[NSNumber numberWithBool:([xtermMouseReporting state]==NSOnState)] forKey:KEY_XTERM_MOUSE_REPORTING];
     [newDict setObject:[NSNumber numberWithBool:([disableSmcupRmcup state]==NSOnState)] forKey:KEY_DISABLE_SMCUP_RMCUP];
+    [newDict setObject:[NSNumber numberWithBool:([allowTitleReporting state]==NSOnState)] forKey:KEY_ALLOW_TITLE_REPORTING];
     [newDict setObject:[NSNumber numberWithBool:([disablePrinting state]==NSOnState)] forKey:KEY_DISABLE_PRINTING];
     [newDict setObject:[NSNumber numberWithBool:([scrollbackWithStatusBar state]==NSOnState)] forKey:KEY_SCROLLBACK_WITH_STATUS_BAR];
     [newDict setObject:[NSNumber numberWithBool:([scrollbackInAlternateScreen state]==NSOnState)] forKey:KEY_SCROLLBACK_IN_ALTERNATE_SCREEN];
@@ -3346,6 +3360,7 @@ static float versionNumber;
     [newDict setObject:[terminalType stringValue] forKey:KEY_TERMINAL_TYPE];
     [newDict setObject:[NSNumber numberWithBool:([sendCodeWhenIdle state]==NSOnState)] forKey:KEY_SEND_CODE_WHEN_IDLE];
     [newDict setObject:[NSNumber numberWithInt:[idleCode intValue]] forKey:KEY_IDLE_CODE];
+    [newDict setObject:[NSNumber numberWithBool:([useCanonicalParser state]==NSOnState)] forKey:KEY_USE_CANONICAL_PARSER];
 
     // Keyboard tab
     [newDict setObject:[origBookmark objectForKey:KEY_KEYBOARD_MAP] forKey:KEY_KEYBOARD_MAP];
@@ -3643,21 +3658,21 @@ static float versionNumber;
 }
 
 - (void)forceTextFieldToBeNumber:(NSTextField *)textField
-				 acceptableRange:(NSRange)range
+                                 acceptableRange:(NSRange)range
 {
-	// NSNumberFormatter seems to have lost its mind on Lion. See a description of the problem here:
-	// http://stackoverflow.com/questions/7976951/nsnumberformatter-erasing-value-when-it-violates-constraints
-	int iv = [self intForString:[textField stringValue] inRange:range];
-	unichar lastChar = '0';
-	int numChars = [[textField stringValue] length];
-	if (numChars) {
-		lastChar = [[textField stringValue] characterAtIndex:numChars - 1];
-	}
-	if (iv != [textField intValue] || (lastChar < '0' || lastChar > '9')) {
-		// If the int values don't match up or there are terminal non-number
-		// chars, then update the value.
-		[textField setIntValue:iv];
-	}
+        // NSNumberFormatter seems to have lost its mind on Lion. See a description of the problem here:
+        // http://stackoverflow.com/questions/7976951/nsnumberformatter-erasing-value-when-it-violates-constraints
+        int iv = [self intForString:[textField stringValue] inRange:range];
+        unichar lastChar = '0';
+        int numChars = [[textField stringValue] length];
+        if (numChars) {
+                lastChar = [[textField stringValue] characterAtIndex:numChars - 1];
+        }
+        if (iv != [textField intValue] || (lastChar < '0' || lastChar > '9')) {
+                // If the int values don't match up or there are terminal non-number
+                // chars, then update the value.
+                [textField setIntValue:iv];
+        }
 }
 
 // NSTextField delegate
@@ -3666,13 +3681,13 @@ static float versionNumber;
     id obj = [aNotification object];
     if (obj == wordChars) {
         defaultWordChars = [[wordChars stringValue] retain];
-	} else if (obj == tmuxDashboardLimit) {
-		[self forceTextFieldToBeNumber:tmuxDashboardLimit
-					   acceptableRange:NSMakeRange(0, 1000)];
-		defaultTmuxDashboardLimit = [[tmuxDashboardLimit stringValue] intValue];
+        } else if (obj == tmuxDashboardLimit) {
+                [self forceTextFieldToBeNumber:tmuxDashboardLimit
+                                           acceptableRange:NSMakeRange(0, 1000)];
+                defaultTmuxDashboardLimit = [[tmuxDashboardLimit stringValue] intValue];
     } else if (obj == scrollbackLines) {
-		[self forceTextFieldToBeNumber:scrollbackLines
-					   acceptableRange:NSMakeRange(0, 10 * 1000 * 1000)];
+                [self forceTextFieldToBeNumber:scrollbackLines
+                                           acceptableRange:NSMakeRange(0, 10 * 1000 * 1000)];
         [self bookmarkSettingChanged:nil];
     } else if (obj == columnsField ||
                obj == rowsField ||
@@ -3733,6 +3748,26 @@ static float versionNumber;
     [keyPress setStringValue:[iTermKeyBindingMgr formatKeyCombination:keyString]];
 }
 
+// Set the local copy of the hotkey, update the pref panel, and register it after a delay.
+- (void)setHotKeyChar:(unsigned short)keyChar code:(unsigned int)keyCode mods:(unsigned int)keyMods
+{
+    defaultHotkeyChar = keyChar;
+    defaultHotkeyCode = keyCode;
+    defaultHotkeyModifiers = keyMods;
+    [[[PreferencePanel sharedInstance] window] makeFirstResponder:[[PreferencePanel sharedInstance] window]];
+    [hotkeyField setStringValue:[iTermKeyBindingMgr formatKeyCombination:[NSString stringWithFormat:@"0x%x-0x%x", keyChar, keyMods]]];
+    [self performSelector:@selector(setHotKey) withObject:self afterDelay:0.01];
+}
+
+- (void)sanityCheckHotKey
+{
+    if (!defaultHotkeyChar) {
+        [self setHotKeyChar:' ' code:kVK_Space mods:NSAlternateKeyMask];
+    } else {
+        [self setHotKeyChar:defaultHotkeyChar code:defaultHotkeyCode mods:defaultHotkeyModifiers];
+    }
+}
+
 - (void)hotkeyKeyDown:(NSEvent*)event
 {
     unsigned int keyMods;
@@ -3743,12 +3778,7 @@ static float versionNumber;
     unsigned short keyChar = [unmodkeystr length] > 0 ? [unmodkeystr characterAtIndex:0] : 0;
     unsigned int keyCode = [event keyCode];
 
-    defaultHotkeyChar = keyChar;
-    defaultHotkeyCode = keyCode;
-    defaultHotkeyModifiers = keyMods;
-    [[[PreferencePanel sharedInstance] window] makeFirstResponder:[[PreferencePanel sharedInstance] window]];
-    [hotkeyField setStringValue:[iTermKeyBindingMgr formatKeyCombination:[NSString stringWithFormat:@"0x%x-0x%x", keyChar, keyMods]]];
-    [self performSelector:@selector(setHotKey) withObject:self afterDelay:0.01];
+    [self setHotKeyChar:keyChar code:keyCode mods:keyMods];
 }
 
 - (void)setHotKey
@@ -3957,7 +3987,7 @@ static float versionNumber;
 
 - (IBAction)addBookmark:(id)sender
 {
-    NSMutableDictionary* newDict = [[NSMutableDictionary alloc] init];
+    NSMutableDictionary* newDict = [[[NSMutableDictionary alloc] init] autorelease];
     // Copy the default bookmark's settings in
     Profile* prototype = [dataSource defaultBookmark];
     if (!prototype) {
@@ -4273,6 +4303,7 @@ static float versionNumber;
         KEY_CURSOR_TYPE,
         KEY_USE_BOLD_FONT,
         KEY_USE_BRIGHT_BOLD,
+        KEY_USE_ITALIC_FONT,
         KEY_ASCII_ANTI_ALIASED,
         KEY_NONASCII_ANTI_ALIASED,
         KEY_ANTI_ALIASING,
@@ -4290,6 +4321,7 @@ static float versionNumber;
         KEY_BLUR_RADIUS,
         KEY_BLUR,
         KEY_BACKGROUND_IMAGE_LOCATION,
+        KEY_BACKGROUND_IMAGE_TILED,
         KEY_SYNC_TITLE,
         KEY_DISABLE_WINDOW_RESIZING,
         KEY_HIDE_AFTER_OPENING,
@@ -4301,6 +4333,7 @@ static float versionNumber;
         KEY_FLASHING_BELL,
         KEY_XTERM_MOUSE_REPORTING,
         KEY_DISABLE_SMCUP_RMCUP,
+        KEY_ALLOW_TITLE_REPORTING,
         KEY_DISABLE_PRINTING,
         KEY_CHARACTER_ENCODING,
         KEY_SCROLLBACK_LINES,
@@ -4308,6 +4341,7 @@ static float versionNumber;
         KEY_SCROLLBACK_IN_ALTERNATE_SCREEN,
         KEY_UNLIMITED_SCROLLBACK,
         KEY_TERMINAL_TYPE,
+        KEY_USE_CANONICAL_PARSER,
         nil
     };
     NSString *sessionKeys[] = {

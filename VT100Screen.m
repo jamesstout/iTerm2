@@ -62,7 +62,12 @@
 
 #define MAX_SCROLLBACK_LINES 1000000
 #define MAX_SCROLL_AT_ONCE 1024
+#define MAX_COLUMNS 4096
+#define MAX_ROWS 4096
 #define DIRTY_MAGIC 0x76  // Used to ensure we don't go off end of dirty array
+
+NSString * const kHighlightForegroundColor = @"kHighlightForegroundColor";
+NSString * const kHighlightBackgroundColor = @"kHighlightBackgroundColor";
 
 typedef struct {
     screen_char_t *saved_buffer_lines;
@@ -70,6 +75,17 @@ typedef struct {
     int savedCursorX;
     int savedCursorY;
 } SavedScreenInfo;
+
+typedef struct {
+    int x, y;
+} CellCoord;
+
+static CellCoord MakeCellCoord(int x, int y) {
+    CellCoord c;
+    c.x = x;
+    c.y = y;
+    return c;
+}
 
 // Wait this long between calls to NSBeep().
 static const double kInterBellQuietPeriod = 0.1;
@@ -81,7 +97,7 @@ static const double kInterBellQuietPeriod = 0.1;
 @end
 
 /* translates normal char into graphics char */
-static void translate(screen_char_t *s, int len)
+void TranslateCharacterSet(screen_char_t *s, int len)
 {
     int i;
 
@@ -98,7 +114,6 @@ void StringToScreenChars(NSString *s,
                          screen_char_t fg,
                          screen_char_t bg,
                          int *len,
-                         NSStringEncoding encoding,
                          BOOL ambiguousIsDoubleWidth,
                          int* cursorIndex) {
     unichar *sc;
@@ -134,6 +149,7 @@ void StringToScreenChars(NSString *s,
             buf[j].foregroundColor = fg.foregroundColor;
             buf[j].alternateForegroundSemantics = fg.alternateForegroundSemantics;
             buf[j].bold = fg.bold;
+            buf[j].italic = fg.italic;
             buf[j].blink = fg.blink;
             buf[j].underline = fg.underline;
 
@@ -144,14 +160,13 @@ void StringToScreenChars(NSString *s,
             lastInitializedChar = j;
         }
 
-        if ((sc[i] >= 0xe000 && sc[i] <= ITERM2_PRIVATE_END) ||
-            sc[i] >= 0xfffd) {
-            // Translate private-use characters into a replacement char.
-            // Unfortunately, the proper replacement char U+fffd is double-width
-            // (at least for some fonts) which screws up formatting.
+        if (sc[i] >= ITERM2_PRIVATE_BEGIN && sc[i] <= ITERM2_PRIVATE_END) {
+            // Translate iTerm2's private-use characters into a "?". Although the replacement
+            // character renders as a double-width char in a single-width char's space and is ugly,
+            // some fonts use dwc's to add extra glyphs. It's kinda sketch, but it's better form to
+            // render what you get than to try to be clever and break such edge cases.
             buf[j].code = '?';
         } else if (sc[i] > 0xa0 && [NSString isDoubleWidthCharacter:sc[i]
-                                                           encoding:encoding
                                              ambiguousIsDoubleWidth:ambiguousIsDoubleWidth]) {
             // This code path is for double-width characters in BMP only.
             j++;
@@ -161,15 +176,16 @@ void StringToScreenChars(NSString *s,
             buf[j].foregroundColor = fg.foregroundColor;
             buf[j].alternateForegroundSemantics = fg.alternateForegroundSemantics;
             buf[j].bold = fg.bold;
+            buf[j].italic = fg.italic;
             buf[j].blink = fg.blink;
             buf[j].underline = fg.underline;
 
             buf[j].backgroundColor = bg.backgroundColor;
             buf[j].alternateBackgroundSemantics = bg.alternateBackgroundSemantics;
-        } else if (sc[i] == 0xfeff ||
-                   sc[i] == 0x200b ||
-                   sc[i] == 0x200c ||
-                   sc[i] == 0x200d) {
+        } else if (sc[i] == 0xfeff ||  // zero width no-break space
+                   sc[i] == 0x200b ||  // zero width space
+                   sc[i] == 0x200c ||  // zero width non-joiner
+                   sc[i] == 0x200d) {  // zero width joiner
             j--;
             lastInitializedChar--;
         } else if (IsCombiningMark(sc[i]) || IsLowSurrogate(sc[i])) {
@@ -187,7 +203,6 @@ void StringToScreenChars(NSString *s,
                 if (IsLowSurrogate(sc[i])) {
                     NSString* str = ComplexCharToStr(buf[j].code);
                     if ([NSString isDoubleWidthCharacter:DecodeSurrogatePair([str characterAtIndex:0], [str characterAtIndex:1])
-                                                encoding:encoding
                                   ambiguousIsDoubleWidth:ambiguousIsDoubleWidth]) {
                         j++;
                         buf[j].code = DWC_RIGHT;
@@ -196,6 +211,7 @@ void StringToScreenChars(NSString *s,
                         buf[j].foregroundColor = fg.foregroundColor;
                         buf[j].alternateForegroundSemantics = fg.alternateForegroundSemantics;
                         buf[j].bold = fg.bold;
+                        buf[j].italic = fg.italic;
                         buf[j].blink = fg.blink;
                         buf[j].underline = fg.underline;
 
@@ -270,7 +286,7 @@ static __inline__ screen_char_t *incrementLinePointer(screen_char_t *buf_start, 
     NSLog(@"%s: 0x%x", __PRETTY_FUNCTION__, self);
 #endif
     if ((self = [super init]) == nil)
-    return nil;
+        return nil;
 
     WIDTH = DEFAULT_WIDTH;
     HEIGHT = DEFAULT_HEIGHT;
@@ -354,17 +370,7 @@ static __inline__ screen_char_t *incrementLinePointer(screen_char_t *buf_start, 
 
 - (NSString *)description
 {
-    NSString *basestr;
-    NSString *result;
-
-#if DEBUG_METHOD_TRACE
-    NSLog(@"%s(%d):-[VT100Screen description]", __FILE__, __LINE__);
-#endif
-    basestr = [NSString stringWithFormat:@"WIDTH %d, HEIGHT %d, CURSOR (%d,%d)",
-           WIDTH, HEIGHT, cursorX, cursorY];
-    result = [NSString stringWithFormat:@"%@\n%@", basestr, @""]; //colstr];
-
-    return result;
+    return [NSString stringWithFormat:@"<%@: %p WIDTH %d, HEIGHT %d, CURSOR (%d,%d)>", [self class], self, WIDTH, HEIGHT, cursorX, cursorY];
 }
 
 -(screen_char_t *)initScreenWithWidth:(int)width Height:(int)height
@@ -767,11 +773,30 @@ static char* FormatCont(int c)
     }
 }
 
-// Set the color of prototypechar to all chars between startPoint and endPoint on the screen.
-- (void)highlightWithChar:(screen_char_t)prototypechar
-                fromPoint:(NSPoint)startPoint
-                  toPoint:(NSPoint)endPoint
+- (int)colorCodeForColor:(NSColor *)theColor
 {
+    theColor = [theColor colorUsingColorSpaceName:NSCalibratedRGBColorSpace];
+    int r = 5 * [theColor redComponent];
+    int g = 5 * [theColor greenComponent];
+    int b = 5 * [theColor blueComponent];
+    return 16 + b + g*6 + r*36;
+}
+
+// Set the color of prototypechar to all chars between startPoint and endPoint on the screen.
+- (void)highlightWithColors:(NSDictionary *)colors
+                  fromPoint:(CellCoord)startPoint
+                    toPoint:(CellCoord)endPoint
+{
+    NSColor *fgColor = [colors objectForKey:kHighlightForegroundColor];
+    NSColor *bgColor = [colors objectForKey:kHighlightBackgroundColor];
+    int fgColorCode, bgColorCode;
+    if (fgColor) {
+        fgColorCode = [self colorCodeForColor:fgColor];
+    }
+    if (bgColor) {
+        bgColorCode = [self colorCodeForColor:bgColor];
+    }
+
     int x = startPoint.x;
     int y = startPoint.y;
     screen_char_t *theLine = nil;
@@ -783,11 +808,17 @@ static char* FormatCont(int c)
             theLine = [self getLineAtScreenIndex:y];
             lineY = y;
         }
-        theLine[x].alternateBackgroundSemantics = prototypechar.alternateBackgroundSemantics;
-        theLine[x].alternateForegroundSemantics = prototypechar.alternateForegroundSemantics;
-        theLine[x].backgroundColor = prototypechar.backgroundColor;
-        theLine[x].foregroundColor = prototypechar.foregroundColor;
-
+        assert(theLine);
+        if (theLine) {
+            if (fgColor) {
+                theLine[x].alternateForegroundSemantics = NO;
+                theLine[x].foregroundColor = fgColorCode;
+            }
+            if (bgColor) {
+                theLine[x].alternateBackgroundSemantics = NO;
+                theLine[x].backgroundColor = bgColorCode;
+            }
+        }
         ++x;
         if (x == WIDTH) {
             x = 0;
@@ -835,7 +866,7 @@ static char* FormatCont(int c)
 
 // Change color of text on screen that matches regex to the color of prototypechar.
 - (void)highlightTextMatchingRegex:(NSString *)regex
-                     prototypeChar:(screen_char_t)prototypechar
+                            colors:(NSDictionary *)colors
 {
     int y = 0;
     while (y < HEIGHT) {
@@ -870,7 +901,11 @@ static char* FormatCont(int c)
                 endY = HEIGHT - 1;
                 endX = WIDTH;
             }
-            [self highlightWithChar:prototypechar fromPoint:NSMakePoint(startX, startY) toPoint:NSMakePoint(endX, endY)];
+            if (startY < HEIGHT) {
+                [self highlightWithColors:colors
+                                fromPoint:MakeCellCoord(startX, startY)
+                                  toPoint:MakeCellCoord(endX, endY)];
+            }
 
             searchRange.location = range.location + range.length;
             searchRange.length = joinedLine.length - searchRange.location;
@@ -1215,8 +1250,8 @@ static BOOL XYIsBeforeXY(int px1, int py1, int px2, int py2) {
     [originalScreenCopy appendBytes:screen_top length:REAL_WIDTH * (HEIGHT - screenTopLine) * sizeof(screen_char_t)];
     [originalScreenCopy appendBytes:buffer_lines length:REAL_WIDTH * screenTopLine * sizeof(screen_char_t)];
 
-    savedInfo->saved_buffer_lines = originalScreenCopy.bytes;
-    savedInfo->saved_screen_top = originalScreenCopy.bytes;
+    savedInfo->saved_buffer_lines = originalScreenCopy.mutableBytes;
+    savedInfo->saved_screen_top = originalScreenCopy.mutableBytes;
     savedInfo->savedCursorY = cursorY;
     savedInfo->savedCursorX = cursorX;
 }
@@ -1347,8 +1382,8 @@ static BOOL XYIsBeforeXY(int px1, int py1, int px2, int py2) {
     LineBuffer *realLineBuffer = linebuffer;
 
     int originalLastPos = [linebuffer lastPos];
-    int originalStartPos;
-    int originalEndPos;
+    int originalStartPos = 0;
+    int originalEndPos = 0;
     BOOL originalIsFullLine;
     if (hasSelection && temp_buffer) {
         // In alternate screen mode, get the original positions of the
@@ -1356,7 +1391,7 @@ static BOOL XYIsBeforeXY(int px1, int py1, int px2, int py2) {
         // relative to the end of the udpated linebuffer (which could change as
         // lines from the base screen are pushed onto it).
         BOOL ok1, ok2;
-        LineBuffer *lineBufferWithAltScreen = [[linebuffer appendOnlyCopy] autorelease];
+        LineBuffer *lineBufferWithAltScreen = [[linebuffer newAppendOnlyCopy] autorelease];
         linebuffer = lineBufferWithAltScreen;
         [self _appendScreenToScrollbackWithUsedHeight:usedHeight newHeight:new_height];
 
@@ -1384,14 +1419,11 @@ static BOOL XYIsBeforeXY(int px1, int py1, int px2, int py2) {
      * alt screen
      */
     [self _appendScreenToScrollbackWithUsedHeight:usedHeight newHeight:new_height];
-    int originalLineBufferLines;
     int newSelStartX = -1, newSelStartY = -1;
     int newSelEndX = -1, newSelEndY = -1;
     BOOL isFullLineSelection = NO;
     if (temp_buffer) {
         // We are in alternate screen mode.
-        originalLineBufferLines = [realLineBuffer numLinesWithWidth:WIDTH];
-
         // Append base screen to real line buffer
         [self appendScreenWithInfo:&baseScreenInfo
                          andHeight:new_height
@@ -1511,7 +1543,7 @@ static BOOL XYIsBeforeXY(int px1, int py1, int px2, int py2) {
         // convertCurrentSelectionToWidth:... happy (the selection's Y values
         // will be able to be looked up) and then after that's done we can swap
         // back to the tempLineBuffer.
-        LineBuffer *appendOnlyLineBuffer = [[realLineBuffer appendOnlyCopy] autorelease];
+        LineBuffer *appendOnlyLineBuffer = [[realLineBuffer newAppendOnlyCopy] autorelease];
         linebuffer = appendOnlyLineBuffer;
         /*                                  **************
          * tempLineBuffer   realLineBuffer  appendOnlyLineBuffer
@@ -1643,6 +1675,24 @@ static BOOL XYIsBeforeXY(int px1, int py1, int px2, int py2) {
 #endif
 }
 
+- (BOOL)usingDefaultCharset {
+    for (int i = 0; i < 4; i++) {
+        if (charset[i]) {
+            return NO;
+        }
+    }
+    if ([TERMINAL charset]) {
+        return NO;
+    }
+    return YES;
+}
+
+- (void)resetCharset {
+    for (int i = 0; i < 4; i++) {
+        charset[i] = 0;
+    }
+}
+
 - (void)reset
 {
     [SESSION clearTriggerLine];
@@ -1650,7 +1700,6 @@ static BOOL XYIsBeforeXY(int px1, int py1, int px2, int py2) {
     [self scrollScreenIntoScrollbackBuffer:1];
 
     // reset terminal scroll top and bottom
-    [self setCursorX:cursorX Y:SCROLL_TOP];
     SCROLL_TOP = 0;
     SCROLL_BOTTOM = HEIGHT - 1;
 
@@ -1658,7 +1707,7 @@ static BOOL XYIsBeforeXY(int px1, int py1, int px2, int py2) {
     [self _setInitialTabStops];
     SAVE_CURSOR_X = 0;
     ALT_SAVE_CURSOR_X = 0;
-    [self setCursorX:cursorX Y:0];
+    [self setCursorX:0 Y:0];
     SAVE_CURSOR_Y = 0;
     ALT_SAVE_CURSOR_Y = 0;
 
@@ -1719,6 +1768,10 @@ static BOOL XYIsBeforeXY(int px1, int py1, int px2, int py2) {
 - (VT100Terminal *)terminal
 {
     return TERMINAL;
+}
+
+- (void)setAllowTitleReporting:(BOOL)allow {
+    allowTitleReporting_ = allow;
 }
 
 - (void)setShellTask:(PTYTask *)shell
@@ -1927,7 +1980,12 @@ static BOOL XYIsBeforeXY(int px1, int py1, int px2, int py2) {
         [self cursorUp:token.u.csi.p[0]];
         [SESSION clearTriggerLine];
         break;
-    case VT100CSI_DA:   [self deviceAttribute:token]; break;
+    case VT100CSI_DA:
+        [self deviceAttribute:token];
+        break;
+    case VT100CSI_DA2:
+        [self secondaryDeviceAttribute:token];
+        break;
     case VT100CSI_DECALN:
         for (i = 0; i < HEIGHT; i++) {
             aLine = [self getLineAtScreenIndex:i];
@@ -1958,7 +2016,12 @@ static BOOL XYIsBeforeXY(int px1, int py1, int px2, int py2) {
     case VT100CSI_DECSTBM: [self setTopBottom:token]; break;
     case VT100CSI_DECSWL: break;
     case VT100CSI_DECTST: break;
-    case VT100CSI_DSR:  [self deviceReport:token]; break;
+    case VT100CSI_DSR:
+        [self deviceReport:token withQuestion:NO];
+        break;
+    case VT100CSI_DECDSR:
+        [self deviceReport:token withQuestion:YES];
+        break;
     case VT100CSI_ED:
         [self eraseInDisplay:token];
         [SESSION clearTriggerLine];
@@ -2012,26 +2075,26 @@ static BOOL XYIsBeforeXY(int px1, int py1, int px2, int py2) {
     case VT100CSI_RM:
             break;
     case VT100CSI_DECSTR: {
-            // VT100CSI_DECSC
-            // See note in xterm-terminfo.txt (search for DECSTR).
+        // VT100CSI_DECSC
+        // See note in xterm-terminfo.txt (search for DECSTR).
 
-            // save cursor (fixes origin-mode side-effect)
-            [self saveCursorPosition];
+        // save cursor (fixes origin-mode side-effect)
+        [self saveCursorPosition];
 
-            // reset scrolling margins
-            VT100TCC wholeScreen;
-            wholeScreen.u.csi.p[0] = 0;
-            wholeScreen.u.csi.p[1] = 0;
-            [self setTopBottom:wholeScreen];
+        // reset scrolling margins
+        VT100TCC wholeScreen = { 0 };
+        wholeScreen.u.csi.p[0] = 0;
+        wholeScreen.u.csi.p[1] = 0;
+        [self setTopBottom:wholeScreen];
 
-            // reset SGR (done in VT100Terminal)
-            // reset wraparound mode (done in VT100Terminal)
-            // reset application cursor keys (done in VT100Terminal)
-            // reset origin mode (done in VT100Terminal)
-            // restore cursor
-            [self restoreCursorPosition];
-            [SESSION clearTriggerLine];
-            break;
+        // reset SGR (done in VT100Terminal)
+        // reset wraparound mode (done in VT100Terminal)
+        // reset application cursor keys (done in VT100Terminal)
+        // reset origin mode (done in VT100Terminal)
+        // restore cursor
+        [self restoreCursorPosition];
+        [SESSION clearTriggerLine];
+        break;
     }
     case VT100CSI_DECSCUSR:
         switch (token.u.csi.p[0]) {
@@ -2082,24 +2145,32 @@ static BOOL XYIsBeforeXY(int px1, int py1, int px2, int py2) {
      *
      * UPDATE: In bug 1997, we see that it breaks line-drawing chars, which
      * are in SCS0. Indeed, mosh fails to draw these as well.
+     *
+     * UPDATE: In bug 2358, we see that SCS1 is also legitimately used in
+     * UTF-8.
+     *
+     * Here's my take on the way things work. There are four charsets: G0
+     * (default), G1, G2, and G3. They are switched between with codes like SI
+     * (^O), SO (^N), LS2 (ESC n), and LS3 (ESC o). You can get the current
+     * character set from [TERMINAL charset], and that gives you a number from
+     * 0 to 3 inclusive. It is an index into Screen's charset array. In iTerm2,
+     * it is an array of booleans where 0 means normal behavior and 1 means
+     * line-drawing. There should be a bunch of other values too (like
+     * locale-specific char sets). This is pretty far away from the spec,
+     * but it works well enough for common behavior, and it seems the spec
+     * doesn't work well with common behavior (esp line drawing).
      */
     case VT100CSI_SCS0:
             charset[0] = (token.u.code=='0');
             break;
     case VT100CSI_SCS1:
-            if ([TERMINAL encoding] != NSUTF8StringEncoding) {
-                charset[1] = (token.u.code=='0');
-            }
+            charset[1] = (token.u.code=='0');
             break;
     case VT100CSI_SCS2:
-            if ([TERMINAL encoding] != NSUTF8StringEncoding) {
-                charset[2] = (token.u.code=='0');
-            }
+            charset[2] = (token.u.code=='0');
             break;
     case VT100CSI_SCS3:
-            if ([TERMINAL encoding] != NSUTF8StringEncoding) {
-                charset[3] = (token.u.code=='0');
-            }
+            charset[3] = (token.u.code=='0');
             break;
     case VT100CSI_SGR:  [self selectGraphicRendition:token]; break;
     case VT100CSI_SM: break;
@@ -2159,10 +2230,12 @@ static BOOL XYIsBeforeXY(int px1, int py1, int px2, int py2) {
             aLine = [self getLineAtScreenIndex:cursorY];
             for (k = 0; cursorX + k < WIDTH && k < j; k++) {
                 aLine[cursorX + k].code = 0;
+                aLine[cursorX + k].complexChar = NO;
                 assert(cursorX + k < WIDTH);
                 CopyForegroundColor(&aLine[cursorX + k], [TERMINAL foregroundColorCodeReal]);
                 CopyBackgroundColor(&aLine[cursorX + k], [TERMINAL backgroundColorCodeReal]);
             }
+            aLine[WIDTH].code = EOL_HARD;
 
             int endX = MIN(WIDTH, dirtyX + j);
             [self setDirtyFromX:dirtyX
@@ -2258,8 +2331,8 @@ static BOOL XYIsBeforeXY(int px1, int py1, int px2, int py2) {
             ![[[SESSION tab] parentWindow] anyFullScreen]) {
             // set the column
             [[SESSION tab] sessionInitiatedResize:SESSION
-                                            width:token.u.csi.p[2]
-                                           height:token.u.csi.p[1]];
+                                            width:MIN(token.u.csi.p[2], MAX_COLUMNS)
+                                           height:MIN(token.u.csi.p[1], MAX_ROWS)];
 
         }
         break;
@@ -2268,8 +2341,8 @@ static BOOL XYIsBeforeXY(int px1, int py1, int px2, int py2) {
             ![[[SESSION tab] parentWindow] anyFullScreen]) {
             // TODO: Only allow this if there is a single session in the tab.
             [[SESSION tab] sessionInitiatedResize:SESSION
-                                            width:(token.u.csi.p[2] / [display charWidth])
-                                           height:(token.u.csi.p[1] / [display lineHeight])];
+                                            width:MIN(token.u.csi.p[2] / [display charWidth], MAX_COLUMNS)
+                                           height:MIN(token.u.csi.p[1] / [display lineHeight], MAX_ROWS)];
         }
         break;
     case XTERMCC_WINDOWPOS:
@@ -2277,8 +2350,8 @@ static BOOL XYIsBeforeXY(int px1, int py1, int px2, int py2) {
         if (![[[SESSION addressBookEntry] objectForKey:KEY_DISABLE_WINDOW_RESIZING] boolValue] &&
             ![[[SESSION tab] parentWindow] anyFullScreen])
             // TODO: Only allow this if there is a single session in the tab.
-            [[[SESSION tab] parentWindow] windowSetFrameTopLeftPoint:NSMakePoint(token.u.csi.p[2],
-                                                                                 [[[[SESSION tab] parentWindow] windowScreen] frame].size.height - token.u.csi.p[1])];
+            [[[SESSION tab] parentWindow] windowSetFrameTopLeftPoint:NSMakePoint(token.u.csi.p[1],
+                                                                                 [[[[SESSION tab] parentWindow] windowScreen] frame].size.height - token.u.csi.p[2])];
         break;
     case XTERMCC_ICONIFY:
         // TODO: Only allow this if there is a single session in the tab.
@@ -2325,9 +2398,15 @@ static BOOL XYIsBeforeXY(int px1, int py1, int px2, int py2) {
     case XTERMCC_REPORT_WIN_POS:
         {
             char buf[64];
-            NSRect frame = [[[SESSION tab] parentWindow] windowFrame];
+            id<WindowControllerInterface> term = [[SESSION tab] parentWindow];
+            NSRect frame = [term windowFrame];
+            NSScreen *screen = [term windowScreen];
+            // Report the Y coordinate in a non-Macish way; give the distance
+            // from the top of the usable part of the display to the top of the
+            // window frame.
+            int y = [screen frame].size.height - frame.origin.y - frame.size.height;
             // TODO: Figure out wtf to do if there are multiple sessions in one tab.
-            snprintf(buf, sizeof(buf), "\033[3;%d;%dt", (int) frame.origin.x, (int) frame.origin.y);
+            snprintf(buf, sizeof(buf), "\033[3;%d;%dt", (int) frame.origin.x, y);
             [SESSION writeTask: [NSData dataWithBytes:buf length:strlen(buf)]];
         }
         break;
@@ -2366,9 +2445,10 @@ static BOOL XYIsBeforeXY(int px1, int py1, int px2, int py2) {
         break;
     case XTERMCC_REPORT_ICON_TITLE: {
         NSString *theString;
-        if ([[NSUserDefaults standardUserDefaults] boolForKey:@"AllowInsecureTitleReporting"]) {
-            theString = [NSString stringWithFormat:@"\033]L%@\033\\", [SESSION windowTitle]];
+        if (allowTitleReporting_) {
+            theString = [NSString stringWithFormat:@"\033]L%@\033\\", [SESSION windowTitle] ? [SESSION windowTitle] : [SESSION defaultName]];
         } else {
+            NSLog(@"Not reporting icon title. You can enable this in prefs>profiles>terminal");
             theString = @"\033]L\033\\";
         }
         NSData *theData = [theString dataUsingEncoding:NSUTF8StringEncoding];
@@ -2377,13 +2457,45 @@ static BOOL XYIsBeforeXY(int px1, int py1, int px2, int py2) {
     }
     case XTERMCC_REPORT_WIN_TITLE: {
         NSString *theString;
-        if ([[NSUserDefaults standardUserDefaults] boolForKey:@"AllowInsecureTitleReporting"]) {
-            theString = [NSString stringWithFormat:@"\033]l%@\033\\", [SESSION windowTitle]];
+        if (allowTitleReporting_) {
+            theString = [NSString stringWithFormat:@"\033]l%@\033\\", [SESSION windowName]];
         } else {
+            NSLog(@"Not reporting window title. You can enable this in prefs>profiles>terminal");
             theString = @"\033]l\033\\";
         }
         NSData *theData = [theString dataUsingEncoding:NSUTF8StringEncoding];
         [SESSION writeTask:theData];
+        break;
+    }
+    case XTERMCC_PUSH_TITLE: {
+        switch (token.u.csi.p[1]) {
+            case 0:
+                [SESSION pushWindowTitle];
+                [SESSION pushIconTitle];
+                break;
+            case 1:
+                [SESSION pushIconTitle];
+                break;
+            case 2:
+                [SESSION pushWindowTitle];
+                break;
+            break;
+        }
+        break;
+    }
+    case XTERMCC_POP_TITLE: {
+        switch (token.u.csi.p[1]) {
+            case 0:
+                [SESSION popWindowTitle];
+                [SESSION popIconTitle];
+                break;
+            case 1:
+                [SESSION popIconTitle];
+                break;
+            case 2:
+                [SESSION popWindowTitle];
+                break;
+        }
         break;
     }
     // Our iTerm specific codes
@@ -2402,16 +2514,7 @@ static BOOL XYIsBeforeXY(int px1, int py1, int px2, int py2) {
         }
         break;
 
-        case UNDERSCORE_TMUX_UNSUPPORTED:
-                [self crlf];
-                [self setString:@"You have run an unsupported version of tmux. Please "
-                        @"install a version that is compatible with this build of iTerm2."
-                                        ascii:YES];
-                [self crlf];
-                [SESSION writeTask:[@"detach\n\n" dataUsingEncoding:NSUTF8StringEncoding]];
-                break;
-
-    case UNDERSCORE_TMUX1:
+    case DCS_TMUX:
         [SESSION startTmuxMode];
         break;
 
@@ -2488,9 +2591,19 @@ static BOOL XYIsBeforeXY(int px1, int py1, int px2, int py2) {
     temp_buffer = NULL;
 }
 
+- (void)setSendModifiers:(int *)modifiers
+               numValues:(int)numValues {
+    NSMutableArray *array = [NSMutableArray array];
+    for (int i = 0; i < numValues; i++) {
+        [array addObject:[NSNumber numberWithInt:modifiers[i]]];
+    }
+    [SESSION setSendModifiers:array];
+}
+
 - (void)mouseModeDidChange:(MouseMode)mouseMode
 {
-        [display updateCursor:nil];
+    [display updateCursor:nil];
+    [display updateTrackingAreas];
 }
 
 - (BOOL)printToAnsi
@@ -2621,7 +2734,7 @@ void DumpBuf(screen_char_t* p, int n) {
         // If a graphics character set was selected then translate buffer
         // characters into graphics charaters.
         if (charset[[TERMINAL charset]]) {
-            translate(buffer, len);
+            TranslateCharacterSet(buffer, len);
         }
         if (dynamicTemp) {
             free(dynamicTemp);
@@ -2679,7 +2792,6 @@ void DumpBuf(screen_char_t* p, int n) {
                             [TERMINAL foregroundColorCode],
                             [TERMINAL backgroundColorCode],
                             &len,
-                            [TERMINAL encoding],
                             [SESSION doubleWidth],
                             NULL);
     }
@@ -2703,6 +2815,7 @@ void DumpBuf(screen_char_t* p, int n) {
         NSAssert(buffer[idx].code != DWC_RIGHT, @"DWC cut off");
 
         if (buffer[idx].code == DWC_SKIP) {
+            // I'm pretty sure this can never happen and that this code is just a historical leftover.
             // This is an invalid unicode character that iTerm2 has appropriated
             // for internal use. Change it to something invalid but safe.
             buffer[idx].code = BOGUS_CHAR;
@@ -3041,13 +3154,14 @@ void DumpBuf(screen_char_t* p, int n) {
         // get the appropriate screen line
         aLine = [self getLineAtScreenIndex:cursorY];
 
-        if (n<WIDTH) {
+        if (n < WIDTH) {
             memmove(aLine + cursorX,
                     aLine + cursorX + n,
                     (WIDTH - cursorX - n) * sizeof(screen_char_t));
         }
         for (i = 0; i < n; i++) {
             aLine[WIDTH-n+i].code = 0;
+            aLine[WIDTH-n+i].complexChar = NO;
             CopyForegroundColor(&aLine[WIDTH-n+i], [TERMINAL foregroundColorCodeReal]);
             CopyBackgroundColor(&aLine[WIDTH-n+i], [TERMINAL backgroundColorCodeReal]);
         }
@@ -3113,8 +3227,21 @@ void DumpBuf(screen_char_t* p, int n) {
     [self setCharAtCursorDirty:1];
 }
 
+- (BOOL)haveTabStopBefore:(int)limit {
+    for (NSNumber *number in tabStops) {
+        if ([number intValue] < limit) {
+            return YES;
+        }
+    }
+    return NO;
+}
+
 - (void)setTab
 {
+    if (![self haveTabStopBefore:WIDTH+1]) {
+        // No legal tabstop so stop; otherwise the for loop would never exit.
+        return;
+    }
     screen_char_t* aLine = [self getLineAtScreenIndex:cursorY];
     int positions = 0;
     BOOL allNulls = YES;
@@ -3185,7 +3312,6 @@ void DumpBuf(screen_char_t* p, int n) {
     }
 
     aDefaultLine = [self _getDefaultLineWithWidth:WIDTH];
-    aLine = aDefaultLine;
     // make the current line the first line and clear everything else
     for (i = cursorY - 1; i >= 0; i--) {
         aLine = [self getLineAtScreenIndex:i];
@@ -3299,7 +3425,8 @@ void DumpBuf(screen_char_t* p, int n) {
             aScreenChar -= HEIGHT * REAL_WIDTH; // wrap around to top of buffer
             assert(aScreenChar < (buffer_lines + HEIGHT*REAL_WIDTH));  // Tried to go way past the end of the screen
         }
-        aScreenChar->code = 0;
+        aScreenChar->code = 0;  // This happens to be EOL_HARD, which happens to work.
+        aScreenChar->complexChar = NO;
         CopyForegroundColor(aScreenChar, [TERMINAL foregroundColorCodeReal]);
         CopyBackgroundColor(aScreenChar, [TERMINAL backgroundColorCodeReal]);
     }
@@ -3343,7 +3470,11 @@ void DumpBuf(screen_char_t* p, int n) {
         CopyForegroundColor(&aLine[i], fgCode);
         CopyBackgroundColor(&aLine[i], bgCode);
     }
-
+    if (x2 == WIDTH && x1 < x2) {
+        // If erasing all the way to the end of the line, set the newline type
+        // to hard so that selections will be copied to the clipboard properly.
+        aLine[WIDTH].code = EOL_HARD;
+    }
     idx = cursorY * WIDTH + x1;
     [self setRangeDirty:NSMakeRange(idx, (x2 - x1))];
     DebugLog(@"eraseInLine");
@@ -3398,39 +3529,26 @@ void DumpBuf(screen_char_t* p, int n) {
 {
     int y = cursorY - (n > 0 ? n : 1);
 
-#if DEBUG_METHOD_TRACE
-    NSLog(@"%s(%d):-[VT100Screen cursorUp:%d]",
-          __FILE__, __LINE__, n);
-#endif
+    int x = MIN(cursorX, WIDTH - 1);
     if (cursorY >= SCROLL_TOP) {
-        [self setCursorX:cursorX Y:y < SCROLL_TOP ? SCROLL_TOP : y];
+        [self setCursorX:x Y:y < SCROLL_TOP ? SCROLL_TOP : y];
     } else {
-        [self setCursorX:cursorX Y:y];
+        [self setCursorX:x Y:y];
     }
-    if (cursorX < WIDTH) {
-        [self setCharAtCursorDirty:1];
-        DebugLog(@"cursorUp");
-    }
+    DebugLog(@"cursorUp");
 }
 
 - (void)cursorDown:(int)n
 {
     int y = cursorY + (n > 0 ? n : 1);
 
-#if DEBUG_METHOD_TRACE
-    NSLog(@"%s(%d):-[VT100Screen cursorDown:%d, Y = %d; SCROLL_BOTTOM = %d]",
-          __FILE__, __LINE__, n, cursorY, SCROLL_BOTTOM);
-#endif
+    int x = MIN(cursorX, WIDTH - 1);
     if (cursorY <= SCROLL_BOTTOM) {
-        [self setCursorX:cursorX Y:y > SCROLL_BOTTOM ? SCROLL_BOTTOM : y];
+        [self setCursorX:x Y:y > SCROLL_BOTTOM ? SCROLL_BOTTOM : y];
     } else {
-        [self setCursorX:cursorX Y:MAX(0, MIN(HEIGHT-1, y))];
+        [self setCursorX:x Y:MAX(0, MIN(HEIGHT-1, y))];
     }
-
-    if (cursorX < WIDTH) {
-        [self setCharAtCursorDirty:1];
-        DebugLog(@"cursorDown");
-    }
+    DebugLog(@"cursorDown");
 }
 
 - (void)cursorToX:(int)x
@@ -3676,17 +3794,10 @@ void DumpBuf(screen_char_t* p, int n) {
     DebugLog(@"scrollDown");
 }
 
-- (void) insertBlank: (int)n
+- (void)insertBlank:(int)n
 {
     screen_char_t *aLine;
     int i;
-
-#if DEBUG_METHOD_TRACE
-    NSLog(@"%s(%d):-[VT100Screen insertBlank; %d]", __FILE__, __LINE__, n);
-#endif
-
-
-//    NSLog(@"insertBlank[%d@(%d,%d)]",n,cursorX,cursorY);
 
     if (cursorX >= WIDTH) {
         return;
@@ -3868,7 +3979,7 @@ void DumpBuf(screen_char_t* p, int n) {
     return GROWL;
 }
 
-- (void)deviceReport:(VT100TCC)token
+- (void)deviceReport:(VT100TCC)token withQuestion:(BOOL)question
 {
     NSData *report = nil;
 
@@ -3899,7 +4010,7 @@ void DumpBuf(screen_char_t* p, int n) {
                 x = cursorX + 1;
                 y = cursorY + 1;
             }
-            report = [TERMINAL reportActivePositionWithX:x Y:y withQuestion:token.u.csi.question];
+            report = [TERMINAL reportActivePositionWithX:x Y:y withQuestion:question];
         }
             break;
 
@@ -3918,16 +4029,31 @@ void DumpBuf(screen_char_t* p, int n) {
     NSData *report = nil;
 
 #if DEBUG_METHOD_TRACE
-    NSLog(@"%s(%d):-[VT100Screen deviceAttribute:%d, modifier = '%c']",
-          __FILE__, __LINE__, token.u.csi.p[0], token.u.csi.modifier);
+    NSLog(@"%s(%d):-[VT100Screen deviceAttribute:%d]",
+          __FILE__, __LINE__, token.u.csi.p[0]);
 #endif
     if (SHELL == nil)
         return;
 
-    if(token.u.csi.modifier == '>')
-        report = [TERMINAL reportSecondaryDeviceAttribute];
-    else
-        report = [TERMINAL reportDeviceAttribute];
+    report = [TERMINAL reportDeviceAttribute];
+
+    if (report != nil) {
+        [SESSION writeTask:report];
+    }
+}
+
+- (void)secondaryDeviceAttribute:(VT100TCC)token
+{
+    NSData *report = nil;
+
+#if DEBUG_METHOD_TRACE
+    NSLog(@"%s(%d):-[VT100Screen secondaryDeviceAttribute:%d]",
+          __FILE__, __LINE__, token.u.csi.p[0]);
+#endif
+    if (SHELL == nil)
+        return;
+
+    report = [TERMINAL reportSecondaryDeviceAttribute];
 
     if (report != nil) {
         [SESSION writeTask:report];
@@ -4013,8 +4139,21 @@ void DumpBuf(screen_char_t* p, int n) {
 {
     [self resetScrollbackOverflow];
     [display deselect];
-    [display setNeedsDisplay:YES];
-    DebugLog(@"setDirty (doesn't actually set dirty)");
+    // There was a call to [display setNeedsDisplay:YES] here which was
+    // a remnant of iTerm 0.1 (see bug 1124) that was killing performance.
+    // I'm almost sure it wasn't doing any good.
+	allDirty_ = YES;
+    DebugLog(@"setDirty (screen scrolled)");
+}
+
+- (BOOL)isAllDirty
+{
+	return allDirty_;
+}
+
+- (void)resetAllDirty
+{
+	allDirty_ = NO;
 }
 
 - (void)doPrint
@@ -4032,7 +4171,6 @@ void DumpBuf(screen_char_t* p, int n) {
 - (BOOL)isDoubleWidthCharacter:(unichar)c
 {
     return [NSString isDoubleWidthCharacter:c
-                                   encoding:[TERMINAL encoding]
                      ambiguousIsDoubleWidth:[SESSION doubleWidth]];
 }
 
@@ -4056,11 +4194,11 @@ void DumpBuf(screen_char_t* p, int n) {
     [self clearBuffer];
     for (NSData *chars in history) {
         screen_char_t *line = (screen_char_t *) [chars bytes];
-        int length = [chars length] / sizeof(screen_char_t);
-        length--;  // Last position is wrap flag
-
-        BOOL isPartial = (line[length].code == EOL_SOFT);
-        [linebuffer appendLine:line length:length partial:isPartial width:WIDTH];
+        const int len = [chars length] / sizeof(screen_char_t);
+        [linebuffer appendLine:line
+                        length:len
+                       partial:NO
+                         width:WIDTH];
     }
     if (!unlimitedScrollback_) {
         [linebuffer dropExcessLinesWithWidth:WIDTH];
@@ -4088,20 +4226,27 @@ void DumpBuf(screen_char_t* p, int n) {
     temp_default_char = [self defaultChar];
 
     // Copy the lines back over it
-    for (int i = 0; i < MIN(lines.count, HEIGHT); i++) {
+    int o = 0;
+    for (int i = 0; o < HEIGHT && i < MIN(lines.count, HEIGHT); i++) {
         NSData *chars = [lines objectAtIndex:i];
         screen_char_t *line = (screen_char_t *) [chars bytes];
         int length = [chars length] / sizeof(screen_char_t);
-        length--;  // Last position is wrap flag
-        BOOL isPartial = (line[length].code == EOL_SOFT);
-        memmove(temp_buffer + i * REAL_WIDTH,
-                line,
-                length * sizeof(screen_char_t));
-        temp_buffer[i * REAL_WIDTH + WIDTH].code = (isPartial ? EOL_SOFT : EOL_HARD);
+
+        do {
+            // Add up to WIDTH characters at a time until they're all used.
+            memmove(temp_buffer + o * REAL_WIDTH,
+                    line,
+                    MIN(WIDTH, length) * sizeof(screen_char_t));
+            const BOOL isPartial = (length > WIDTH);
+            temp_buffer[o * REAL_WIDTH + WIDTH].code = (isPartial ? EOL_SOFT : EOL_HARD);
+            length -= WIDTH;
+            line += WIDTH;
+            o++;
+        } while (o < HEIGHT && length > 0);
     }
 }
 
-- (NSValue *)valueFromDictionary:(NSDictionary *)dict withFirstKeyFrom:(NSArray *)keys {
+- (id)objectInDictionary:(NSDictionary *)dict withFirstKeyFrom:(NSArray *)keys {
     for (NSString *key in keys) {
         NSObject *object = [dict objectForKey:key];
         if (object) {
@@ -4113,24 +4258,24 @@ void DumpBuf(screen_char_t* p, int n) {
 
 - (void)setTmuxState:(NSDictionary *)state
 {
-    int savedGrid = [[self valueFromDictionary:state
-                              withFirstKeyFrom:[NSArray arrayWithObjects:kStateDictSavedGrid,
-                                                                         kStateDictInAlternateScreen,
-                                                                         nil]] intValue];
+    int savedGrid = [[self objectInDictionary:state
+                             withFirstKeyFrom:[NSArray arrayWithObjects:kStateDictSavedGrid,
+                                                                        kStateDictInAlternateScreen,
+                                                                        nil]] intValue];
     if (!savedGrid && temp_buffer) {
         free(temp_buffer);
         temp_buffer = NULL;
     }
     // TODO(georgen): Get the alt screen contents and fill temp_buffer.
 
-    SAVE_CURSOR_X = [[self valueFromDictionary:state
-                              withFirstKeyFrom:[NSArray arrayWithObjects:kStateDictSavedCX,
-                                                                         kStateDictBaseCursorX,
-                                                                         nil]] intValue];
-    SAVE_CURSOR_Y = [[self valueFromDictionary:state
-                              withFirstKeyFrom:[NSArray arrayWithObjects:kStateDictSavedCY,
-                                                                         kStateDictBaseCursorY,
-                                                                         nil]] intValue];
+    SAVE_CURSOR_X = [[self objectInDictionary:state
+                             withFirstKeyFrom:[NSArray arrayWithObjects:kStateDictSavedCX,
+                                                                        kStateDictBaseCursorX,
+                                                                        nil]] intValue];
+    SAVE_CURSOR_Y = [[self objectInDictionary:state
+                             withFirstKeyFrom:[NSArray arrayWithObjects:kStateDictSavedCY,
+                                                                        kStateDictBaseCursorY,
+                                                                        nil]] intValue];
     cursorX = [[state objectForKey:kStateDictCursorX] intValue];
     cursorY = [[state objectForKey:kStateDictCursorY] intValue];
     SCROLL_TOP = [[state objectForKey:kStateDictScrollRegionUpper] intValue];

@@ -132,6 +132,7 @@
     if(_overflowPopUpButton){
         // configure
         [_overflowPopUpButton setAutoresizingMask:NSViewNotSizable|NSViewMinXMargin];
+        [[_overflowPopUpButton cell] accessibilitySetOverrideValue:NSLocalizedStringFromTableInBundle(@"More tabs", @"iTerm", [NSBundle bundleForClass:[self class]], @"VoiceOver label for the button displaying menu of additional overflown tabs on click") forAttribute:NSAccessibilityDescriptionAttribute];
     }
 
     // new tab button
@@ -850,8 +851,7 @@
 {
     NSTabViewItem *theItem = [tabView tabViewItemAtIndex:sourceIndex];
     BOOL reselect = ([tabView selectedTabViewItem] == theItem);
-    [theItem retain];
-    
+
     id tempDelegate = [tabView delegate];
     [tabView setDelegate:nil];
     [theItem retain];
@@ -939,7 +939,6 @@
                 if (!_useOverflowMenu) {
                     int j, averageWidth = (availableWidth / cellCount);
 
-                    numberOfVisibleCells = cellCount;
                     [newWidths removeAllObjects];
 
                     for (j = 0; j < cellCount; j++) {
@@ -1024,8 +1023,6 @@
                         if (totalOccupiedWidth < availableWidth) {
                             [newWidths replaceObjectAtIndex:0 withObject:[NSNumber numberWithFloat:availableWidth - [cellWidth floatValue]]];
                         }
-
-                        numberOfVisibleCells = 2;
                     }
 
                     break; // done assigning widths; remaining cells go in overflow menu
@@ -1890,6 +1887,7 @@
             [[self delegate] tabView: aTabView didSelectTabViewItem: tabViewItem];
         }
     }
+    NSAccessibilityPostNotification(self, NSAccessibilityValueChangedNotification);
 }
 
 - (void) tabView:(NSTabView *)tabView doubleClickTabViewItem:(NSTabViewItem *)tabViewItem
@@ -2190,8 +2188,9 @@
 {
     int i, cellCount = [_cells count];
     for(i = 0; i < cellCount; i++){
-        if([[_cells objectAtIndex:i] isInOverflowMenu])
-            return i+1;
+        if ([[_cells objectAtIndex:i] isInOverflowMenu]) {
+            return i;
+        }
     }
     return cellCount;
 }
@@ -2203,12 +2202,45 @@
     return NO;
 }
 
+- (NSArray*)accessibilityAttributeNames
+{
+    static NSArray *attributes = nil;
+    if (!attributes) {
+        NSSet *set = [NSSet setWithArray:[super accessibilityAttributeNames]];
+        set = [set setByAddingObjectsFromArray:[NSArray arrayWithObjects:
+                                                NSAccessibilityTabsAttribute,
+                                                NSAccessibilityValueAttribute,
+                                                nil]];
+        attributes = [[set allObjects] retain];
+    }
+    return attributes;
+}
+
 - (id)accessibilityAttributeValue:(NSString *)attribute {
     id attributeValue = nil;
     if ([attribute isEqualToString: NSAccessibilityRoleAttribute]) {
-        attributeValue = NSAccessibilityGroupRole;
+        attributeValue = NSAccessibilityTabGroupRole;
     } else if ([attribute isEqualToString: NSAccessibilityChildrenAttribute]) {
+        NSMutableArray *children = [NSMutableArray arrayWithArray:[_cells objectsAtIndexes:[NSIndexSet indexSetWithIndexesInRange:NSMakeRange(0, [self numberOfVisibleTabs])]]];
+        if (![_overflowPopUpButton isHidden]) {
+            [children addObject:_overflowPopUpButton];
+        }
+        if (![_addTabButton isHidden]) {
+            [children addObject:_addTabButton];
+        }
+        attributeValue = NSAccessibilityUnignoredChildren(children);
+    } else if ([attribute isEqualToString: NSAccessibilityTabsAttribute]) {
         attributeValue = NSAccessibilityUnignoredChildren(_cells);
+    } else if ([attribute isEqualToString:NSAccessibilityValueAttribute]) {
+        NSTabViewItem *tabViewItem = [tabView selectedTabViewItem];
+        for (NSActionCell *cell in _cells) {
+            if ([cell representedObject] == tabViewItem)
+                attributeValue = cell;
+        }
+        if (!attributeValue)
+        {
+            NSLog(@"WARNING: seems no tab cell is currently selected");
+        }
     } else {
         attributeValue = [super accessibilityAttributeValue:attribute];
     }

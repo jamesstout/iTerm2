@@ -31,11 +31,15 @@ Development:
 Dep:
 	xcodebuild -parallelizeTargets -alltargets -configuration Deployment
 
+LeopardPPC:
+	xcodebuild -parallelizeTargets -alltargets -configuration "Leopard Deployment" && \
+	chmod -R go+rX build/"Leopard Deployment"
+
 Deployment:
 	xcodebuild -parallelizeTargets -alltargets -configuration Deployment && \
 	chmod -R go+rX build/Deployment
 
-Nightly:
+Nightly: force
 	xcodebuild -parallelizeTargets -alltargets -configuration Nightly && \
 	chmod -R go+rX build/Nightly
 
@@ -72,6 +76,12 @@ canary:
 	./canary.sh
 
 release:
+	echo "You need to unlock your keychain for signing to work."
+	security unlock-keychain ~/Library/Keychains/login.keychain
 	cp release-iTerm.plist iTerm.plist
 	make Deployment
-	./release.sh
+	cp legacy-iTerm.plist iTerm.plist
+	make LeopardPPC
+	./release.sh RanFromMakefile
+
+force:

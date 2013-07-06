@@ -78,9 +78,9 @@ static NSString *SCRIPT_DIRECTORY = @"~/Library/Application Support/iTerm/Script
 // Comparator for sorting encodings
 static NSInteger _compareEncodingByLocalizedName(id a, id b, void *unused)
 {
-    NSString *sa = [NSString localizedNameOfStringEncoding: [a unsignedIntValue]];
-    NSString *sb = [NSString localizedNameOfStringEncoding: [b unsignedIntValue]];
-    return [sa caseInsensitiveCompare: sb];
+    NSString *sa = [NSString localizedNameOfStringEncoding:[a unsignedIntValue]];
+    NSString *sb = [NSString localizedNameOfStringEncoding:[b unsignedIntValue]];
+    return [sa caseInsensitiveCompare:sb];
 }
 
 static BOOL UncachedIsMountainLionOrLater(void) {
@@ -185,14 +185,14 @@ static BOOL initDone = NO;
         NSFileManager *fileManager = [NSFileManager defaultManager];
 
         // create the "~/Library/Application Support" directory if it does not exist
-        if ([fileManager fileExistsAtPath: [APPLICATION_SUPPORT_DIRECTORY stringByExpandingTildeInPath]] == NO) {
+        if ([fileManager fileExistsAtPath:[APPLICATION_SUPPORT_DIRECTORY stringByExpandingTildeInPath]] == NO) {
             [fileManager createDirectoryAtPath:[APPLICATION_SUPPORT_DIRECTORY stringByExpandingTildeInPath]
                    withIntermediateDirectories:YES
                                     attributes:nil
                                          error:nil];
         }
 
-        if ([fileManager fileExistsAtPath: [SUPPORT_DIRECTORY stringByExpandingTildeInPath]] == NO) {
+        if ([fileManager fileExistsAtPath:[SUPPORT_DIRECTORY stringByExpandingTildeInPath]] == NO) {
             [fileManager createDirectoryAtPath:[SUPPORT_DIRECTORY stringByExpandingTildeInPath]
                    withIntermediateDirectories:YES
                                     attributes:nil
@@ -254,13 +254,41 @@ static BOOL initDone = NO;
     }
 }
 
+- (BOOL)haveTmuxConnection
+{
+    return [self anyTmuxSession] != nil;
+}
+
+- (PTYSession *)anyTmuxSession
+{
+    for (PseudoTerminal* terminal in terminalWindows) {
+        for (PTYSession *session in [terminal sessions]) {
+            if ([session isTmuxClient] || [session isTmuxGateway]) {
+                return session;
+            }
+        }
+    }
+    return nil;
+}
+
 // Action methods
 - (IBAction)newWindow:(id)sender
 {
-    [self launchBookmark:nil inTerminal: nil];
+    [self newWindow:sender possiblyTmux:NO];
 }
 
-- (void) newSessionInTabAtIndex: (id) sender
+- (void)newWindow:(id)sender possiblyTmux:(BOOL)possiblyTmux
+{
+    if (possiblyTmux &&
+        FRONT &&
+        [[FRONT currentSession] isTmuxClient]) {
+        [FRONT newTmuxWindow:sender];
+    } else {
+        [self launchBookmark:nil inTerminal:nil];
+    }
+}
+
+- (void)newSessionInTabAtIndex:(id)sender
 {
     Profile* bookmark = [[ProfileModel sharedInstance] bookmarkWithGuid:[sender representedObject]];
     if (bookmark) {
@@ -283,7 +311,7 @@ static BOOL initDone = NO;
     keyWindowIndexMemo_ = i;
 }
 
-- (void)newSessionInWindowAtIndex: (id) sender
+- (void)newSessionInWindowAtIndex:(id) sender
 {
     Profile* bookmark = [[ProfileModel sharedInstance] bookmarkWithGuid:[sender representedObject]];
     if (bookmark) {
@@ -292,9 +320,8 @@ static BOOL initDone = NO;
 }
 
 // meant for action for menu items that have a submenu
-- (void) noAction: (id) sender
+- (void)noAction:(id)sender
 {
-
 }
 
 - (IBAction)newSessionWithSameProfile:(id)sender
@@ -308,7 +335,22 @@ static BOOL initDone = NO;
 
 - (IBAction)newSession:(id)sender
 {
-    [self launchBookmark:nil inTerminal: FRONT];
+    DLog(@"iTermController newSession:");
+    [self newSession:sender possiblyTmux:NO];
+}
+
+// Launch a new session using the default profile. If the current session is
+// tmux and possiblyTmux is true, open a new tmux session.
+- (void)newSession:(id)sender possiblyTmux:(BOOL)possiblyTmux
+{
+    DLog(@"newSession:%@ possiblyTmux:%d from %@", sender, (int)possiblyTmux, [NSThread callStackSymbols]);
+    if (possiblyTmux &&
+        FRONT &&
+        [[FRONT currentSession] isTmuxClient]) {
+        [FRONT newTmuxTab:sender];
+    } else {
+        [self launchBookmark:nil inTerminal:FRONT];
+    }
 }
 
 // navigation
@@ -328,7 +370,7 @@ static BOOL initDone = NO;
                                        otherButton:nil
                          informativeTextWithFormat:@""];
 
-    NSTextField *input = [[NSTextField alloc] initWithFrame:NSMakeRect(0, 0, 200, 24)];
+    NSTextField *input = [[[NSTextField alloc] initWithFrame:NSMakeRect(0, 0, 200, 24)] autorelease];
     [input setStringValue:defaultValue];
     [alert setAccessoryView:input];
     [alert layout];
@@ -575,7 +617,7 @@ static BOOL initDone = NO;
         [self restorePreviouslyActiveApp];
     }
     if (FRONT == theTerminalWindow) {
-        [self setCurrentTerminal: nil];
+        [self setCurrentTerminal:nil];
     }
     if (theTerminalWindow) {
         [self removeFromTerminalsAtIndex:[terminalWindows indexOfObject:theTerminalWindow]];
@@ -590,7 +632,7 @@ static BOOL initDone = NO;
 
     for (p = [NSString availableStringEncodings]; *p; ++p)
         [tmp addObject:[NSNumber numberWithUnsignedInt:*p]];
-    [tmp sortUsingFunction: _compareEncodingByLocalizedName context:NULL];
+    [tmp sortUsingFunction:_compareEncodingByLocalizedName context:NULL];
 
     return (tmp);
 }
@@ -883,9 +925,9 @@ static BOOL initDone = NO;
                                              windowType:WINDOW_TYPE_NORMAL
                                                  screen:[bookmark objectForKey:KEY_SCREEN] ? [[bookmark objectForKey:KEY_SCREEN] intValue] : -1
                                                isHotkey:NO] autorelease];
-	if ([[bookmark objectForKey:KEY_HIDE_AFTER_OPENING] boolValue]) {
-		[term hideAfterOpening];
-	}
+        if ([[bookmark objectForKey:KEY_HIDE_AFTER_OPENING] boolValue]) {
+                [term hideAfterOpening];
+        }
     [self addInTerminals:term];
     return term;
 }
@@ -905,7 +947,6 @@ static BOOL initDone = NO;
 
     // Where do we execute this command?
     BOOL toggle = NO;
-    BOOL makeKey = NO;
     if (theTerm == nil) {
         [iTermController switchToSpaceInBookmark:aDict];
         int windowType = [self _windowTypeForBookmark:aDict];
@@ -921,10 +962,8 @@ static BOOL initDone = NO;
                                                  windowType:windowType
                                                      screen:[aDict objectForKey:KEY_SCREEN] ? [[aDict objectForKey:KEY_SCREEN] intValue] : -1
                                                    isHotkey:disableLionFullscreen] autorelease];
-		if ([[aDict objectForKey:KEY_HIDE_AFTER_OPENING] boolValue]) {
-			[term hideAfterOpening];
-		} else {
-            makeKey = YES;
+                if ([[aDict objectForKey:KEY_HIDE_AFTER_OPENING] boolValue]) {
+                        [term hideAfterOpening];
         }
         [self addInTerminals:term];
         if (disableLionFullscreen) {
@@ -936,7 +975,6 @@ static BOOL initDone = NO;
         }
     } else {
         term = theTerm;
-        makeKey = YES;
     }
 
     PTYSession* session = [term addNewSession:aDict];
@@ -986,9 +1024,9 @@ static BOOL initDone = NO;
         term = [[[PseudoTerminal alloc] initWithSmartLayout:YES
                                                  windowType:[self _windowTypeForBookmark:aDict]
                                                      screen:[aDict objectForKey:KEY_SCREEN] ? [[aDict objectForKey:KEY_SCREEN] intValue] : -1] autorelease];
-		if ([[aDict objectForKey:KEY_HIDE_AFTER_OPENING] boolValue]) {
-			[term hideAfterOpening];
-		}
+                if ([[aDict objectForKey:KEY_HIDE_AFTER_OPENING] boolValue]) {
+                        [term hideAfterOpening];
+                }
         [self addInTerminals:term];
         toggle = (([term windowType] == WINDOW_TYPE_FULL_SCREEN) ||
                   ([term windowType] == WINDOW_TYPE_LION_FULL_SCREEN));
@@ -1018,9 +1056,9 @@ static BOOL initDone = NO;
     // Automatically fill in ssh command if command is exactly equal to $$ or it's a login shell.
     BOOL ignore;
     if (aDict == nil ||
-		[[ITAddressBookMgr bookmarkCommand:aDict
-							isLoginSession:&ignore
-							 forObjectType:objectType] isEqualToString:@"$$"] ||
+                [[ITAddressBookMgr bookmarkCommand:aDict
+                                                        isLoginSession:&ignore
+                                                         forObjectType:objectType] isEqualToString:@"$$"] ||
         ![[aDict objectForKey:KEY_CUSTOM_COMMAND] isEqualToString:@"Yes"]) {
         Profile* prototype = aDict;
         if (!prototype) {
@@ -1034,7 +1072,7 @@ static BOOL initDone = NO;
         }
 
         NSMutableDictionary *tempDict = [NSMutableDictionary dictionaryWithDictionary:prototype];
-        NSURL *urlRep = [NSURL URLWithString: url];
+        NSURL *urlRep = [NSURL URLWithString:url];
         NSString *urlType = [urlRep scheme];
 
         if ([urlType compare:@"ssh" options:NSCaseInsensitiveSearch] == NSOrderedSame) {
@@ -1081,10 +1119,10 @@ static BOOL initDone = NO;
         term = [[[PseudoTerminal alloc] initWithSmartLayout:YES
                                                  windowType:[self _windowTypeForBookmark:aDict]
                                                      screen:[aDict objectForKey:KEY_SCREEN] ? [[aDict objectForKey:KEY_SCREEN] intValue] : -1] autorelease];
-		if ([[aDict objectForKey:KEY_HIDE_AFTER_OPENING] boolValue]) {
-			[term hideAfterOpening];
-		}
-        [self addInTerminals: term];
+                if ([[aDict objectForKey:KEY_HIDE_AFTER_OPENING] boolValue]) {
+                        [term hideAfterOpening];
+                }
+        [self addInTerminals:term];
         toggle = (([term windowType] == WINDOW_TYPE_FULL_SCREEN) ||
                   ([term windowType] == WINDOW_TYPE_LION_FULL_SCREEN));
     } else {
@@ -1100,18 +1138,18 @@ static BOOL initDone = NO;
 
 - (void)launchScript:(id)sender
 {
-    NSString *fullPath = [NSString stringWithFormat: @"%@/%@", [SCRIPT_DIRECTORY stringByExpandingTildeInPath], [sender title]];
+    NSString *fullPath = [NSString stringWithFormat:@"%@/%@", [SCRIPT_DIRECTORY stringByExpandingTildeInPath], [sender title]];
 
-    if ([[[sender title] pathExtension] isEqualToString: @"scpt"]) {
+    if ([[[sender title] pathExtension] isEqualToString:@"scpt"]) {
         NSAppleScript *script;
         NSDictionary *errorInfo = [NSDictionary dictionary];
-        NSURL *aURL = [NSURL fileURLWithPath: fullPath];
+        NSURL *aURL = [NSURL fileURLWithPath:fullPath];
 
         // Make sure our script suite registry is loaded
         [NSScriptSuiteRegistry sharedScriptSuiteRegistry];
 
-        script = [[NSAppleScript alloc] initWithContentsOfURL: aURL error: &errorInfo];
-        [script executeAndReturnError: &errorInfo];
+        script = [[NSAppleScript alloc] initWithContentsOfURL:aURL error:&errorInfo];
+        [script executeAndReturnError:&errorInfo];
         [script release];
     }
     else {
@@ -1985,7 +2023,7 @@ NSString *terminalsKey = @"terminals";
 -(id)valueInTerminalsAtIndex:(unsigned)theIndex
 {
     //NSLog(@"iTerm: valueInTerminalsAtIndex %d: %@", theIndex, [terminalWindows objectAtIndex: theIndex]);
-    return ([terminalWindows objectAtIndex: theIndex]);
+    return ([terminalWindows objectAtIndex:theIndex]);
 }
 
 - (void)setCurrentTerminal:(PseudoTerminal*)thePseudoTerminal
@@ -1994,7 +2032,7 @@ NSString *terminalsKey = @"terminals";
 
     // make sure this window is the key window
     if ([thePseudoTerminal windowInited] && [[thePseudoTerminal window] isKeyWindow] == NO) {
-        [[thePseudoTerminal window] makeKeyAndOrderFront: self];
+        [[thePseudoTerminal window] makeKeyAndOrderFront:self];
         if ([thePseudoTerminal fullScreen]) {
           [thePseudoTerminal hideMenuBar];
         }
@@ -2010,7 +2048,7 @@ NSString *terminalsKey = @"terminals";
 -(void)replaceInTerminals:(PseudoTerminal *)object atIndex:(unsigned)theIndex
 {
     // NSLog(@"iTerm: replaceInTerminals 0x%x atIndex %d", object, theIndex);
-    [terminalWindows replaceObjectAtIndex: theIndex withObject: object];
+    [terminalWindows replaceObjectAtIndex:theIndex withObject:object];
     [self updateWindowTitles];
 }
 
@@ -2030,7 +2068,7 @@ NSString *terminalsKey = @"terminals";
 
 -(void)insertInTerminals:(PseudoTerminal *)object atIndex:(unsigned)theIndex
 {
-    if ([terminalWindows containsObject: object] == YES) {
+    if ([terminalWindows containsObject:object] == YES) {
         return;
     }
 
@@ -2046,7 +2084,7 @@ NSString *terminalsKey = @"terminals";
 -(void)removeFromTerminalsAtIndex:(unsigned)theIndex
 {
     // NSLog(@"iTerm: removeFromTerminalsAtInde %d", theIndex);
-    [terminalWindows removeObjectAtIndex: theIndex];
+    [terminalWindows removeObjectAtIndex:theIndex];
     [self updateWindowTitles];
 }
 

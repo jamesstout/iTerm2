@@ -30,6 +30,7 @@
 #import "PseudoTerminal.h"
 #import "PTYTab.h"
 #import "GlobalSearch.h"
+#import "FutureMethods.h"
 
 static const float THUMB_MARGIN = 25;
 /*
@@ -1256,6 +1257,7 @@ static NSScreen *ExposeScreen() {
     window_ = nil;
     [view_ release];
     view_ = nil;
+    SetSystemUIMode(kUIModeNormal, 0);
 }
 
 - (void)showWindows:(BOOL)fade
@@ -1353,6 +1355,9 @@ static int CompareFrames(const void* aPtr, const void* bPtr)
 
 - (void)recomputeIndices:(NSNotification*)notification
 {
+    if (![self isVisible]) {
+        return;
+    }
     if (![[view_ grid] recomputeIndices]) {
         [self _toggleOff];
     }
@@ -1460,10 +1465,12 @@ static BOOL AdvanceCell(float* x, float* y, NSRect screenFrame, NSSize size) {
     for (i = 0; i < n; ) {
         int j;
         for (j = i; j < n; j++) {
+            // The analyzer warning here is bogus (all frames from 0 to n-1 are initialized above).
             if (frames[j].origin.y != frames[i].origin.y) {
                 break;
             }
         }
+        // The analyzer warning here is bogus (all frames from 0 to n-1 are initialized above).
         const float horizontalSpan = frames[j-1].origin.x + frames[j-1].size.width - frames[i].origin.x;
         const float horizontalShift = (screenFrame.size.width - horizontalSpan) / 2;
         for (int k = i; k < j; k++) {
@@ -1564,8 +1571,8 @@ static BOOL AdvanceCell(float* x, float* y, NSRect screenFrame, NSSize size) {
 
     // Figure out the right size for a thumbnail.
     NSScreen* theScreen = ExposeScreen();
-    NSRect screenFrame = [theScreen visibleFrame];
-    screenFrame.origin = NSZeroPoint;
+    SetSystemUIMode(kUIModeAllHidden, 0);
+    NSRect screenFrame = [theScreen frame];
     // Create the window and its view.
     window_ = [[iTermExposeWindow alloc] initWithContentRect:screenFrame
                                                    styleMask:NSBorderlessWindowMask
@@ -1659,6 +1666,7 @@ static BOOL AdvanceCell(float* x, float* y, NSRect screenFrame, NSSize size) {
 
 - (void)_toggleOff
 {
+    SetSystemUIMode(kUIModeNormal, 0);
     [[view_ grid] onSelection:nil session:nil];
 }
 

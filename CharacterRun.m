@@ -8,66 +8,26 @@
 
 #import "CharacterRun.h"
 #import "ScreenChar.h"
+#import "PreferencePanel.h"
 
-@implementation SharedCharacterRunData
-
-@synthesize codes = codes_;
-@synthesize advances = advances_;
-@synthesize glyphs = glyphs_;
-@synthesize freeRange = freeRange_;
-
-+ (SharedCharacterRunData *)sharedCharacterRunDataWithCapacity:(int)capacity {
-    SharedCharacterRunData *data = [[[SharedCharacterRunData alloc] init] autorelease];
-    data->capacity_ = capacity;
-    data.codes = malloc(sizeof(unichar) * capacity);
-    data.advances = malloc(sizeof(CGSize) * capacity);
-    data.glyphs = malloc(sizeof(CGGlyph) * capacity);
-    data.freeRange = NSMakeRange(0, capacity);
-    return data;
-}
-
-- (void)dealloc {
-    free(codes_);
-    free(advances_);
-    free(glyphs_);
-    [super dealloc];
-}
-
-- (void)advance:(int)positions {
-    freeRange_.location += positions;
-    assert(freeRange_.length >= positions);
-    freeRange_.length -= positions;
-}
-
-- (void)reserve:(int)space {
-    if (freeRange_.length < space) {
-        int newSize = (capacity_ + space) * 2;
-        int growth = newSize - capacity_;
-        capacity_ = newSize;
-        freeRange_.length += growth;
-        codes_ = realloc(codes_, sizeof(unichar) * capacity_);
-        advances_ = realloc(advances_, sizeof(CGSize) * capacity_);
-        glyphs_ = realloc(glyphs_, sizeof(CGGlyph) * capacity_);
-    }
-}
-
-@end
+static const int kDefaultAdvancesCapacity = 100;
 
 @implementation CharacterRun
 
 @synthesize antiAlias = antiAlias_;
 @synthesize color = color_;
-@synthesize runType = runType_;
 @synthesize fakeBold = fakeBold_;
 @synthesize x = x_;
 @synthesize fontInfo = fontInfo_;
-@synthesize sharedData = sharedData_;
-@synthesize range = range_;
+@synthesize advancedFontRendering = advancedFontRendering_;
 
 - (id)init {
     self = [super init];
     if (self) {
-        runType_ = kCharacterRunMultipleSimpleChars;
+        string_ = [[NSMutableAttributedString alloc] init];
+        advancesCapacity_ = kDefaultAdvancesCapacity;
+        advancesSize_ = 0;
+        advances_ = malloc(advancesCapacity_ * sizeof(float));
     }
     return self;
 }
@@ -75,197 +35,149 @@
 - (void)dealloc {
     [color_ release];
     [fontInfo_ release];
-    [sharedData_ release];
+    [string_ release];
+    free(advances_);
+
     [super dealloc];
 }
 
 - (id)copyWithZone:(NSZone *)zone {
     CharacterRun *theCopy = [[CharacterRun alloc] init];
     theCopy.antiAlias = antiAlias_;
-    theCopy.runType = runType_;
     theCopy.fontInfo = fontInfo_;
     theCopy.color = color_;
     theCopy.fakeBold = fakeBold_;
     theCopy.x = x_;
-    theCopy.sharedData = sharedData_;
-    theCopy.range = range_;
+    [theCopy->string_ release];
+    theCopy->string_ = [string_ mutableCopy];
+    theCopy->advances_ = (float*)realloc(theCopy->advances_, advancesCapacity_ * sizeof(float));
+    memcpy(theCopy->advances_, advances_, advancesCapacity_ * sizeof(float));
+    theCopy->advancesCapacity_ = advancesCapacity_;
+    memmove(theCopy->temp_, temp_, sizeof(temp_));
+    theCopy->tempCount_ = tempCount_;
+    theCopy->advancesSize_ = advancesSize_;
+    theCopy.advancedFontRendering = advancedFontRendering_;
     return theCopy;
 }
 
-- (NSString *)description {
-    NSMutableString *d = [NSMutableString string];
-    [d appendFormat:@"<CharacterRun: %p codes=\"", self];
-    unichar *c = [self codes];
-    c += range_.location;
-    for (int i = 0; i < range_.length; i++) {
-        [d appendFormat:@"%x ", (int)c[i + range_.location]];
-    }
-    [d appendFormat:@"\">"];
-    return d;
-}
+// Align positions into cells.
+- (int)getPositions:(NSPoint *)positions
+             forRun:(CTRunRef)run
+    startingAtIndex:(int)firstCharacterIndex
+         glyphCount:(int)glyphCount
+        runWidthPtr:(CGFloat *)runWidthPtr {
+    const NSPoint *suggestedPositions = CTRunGetPositionsPtr(run);
+    const CFIndex *indices = CTRunGetStringIndicesPtr(run);
 
-- (unichar *)codes {
-    return sharedData_.codes + range_.location;
-}
-
-- (CGSize *)advances {
-    return sharedData_.advances + range_.location;
-}
-
-- (CGGlyph *)glyphs {
-    return sharedData_.glyphs + range_.location;
-}
-
-// Given a run with codes x1,x2,...,xn, change self to have codes x1,x2,...,x(i-1).
-// and return a new run (with the same attributes as self) with codes xi,x(i+1),...,xn.
-- (CharacterRun *)splitBeforeIndex:(int)truncateBeforeIndex
-{
-    CharacterRun *tailRun = [[self copy] autorelease];
-    CGSize *advances = [self advances];
-
-    for (int i = 0; i < truncateBeforeIndex; ++i) {
-        tailRun.x += advances[i].width;
-    }
-    tailRun.range = NSMakeRange(tailRun.range.location + truncateBeforeIndex,
-                                tailRun.range.length - truncateBeforeIndex);
-    range_.length = truncateBeforeIndex;
-
-    return tailRun;
-}
-
-// Returns the index of the first glyph in [self glyphs] valued 0, or -1 if there is none.
-- (int)indexOfFirstMissingGlyph {
-    CGGlyph *glyphs = [self glyphs];
-    for (int i = 0; i < range_.length; i++) {
-        if (!glyphs[i]) {
-            return i;
-        }
-    }
-    return -1;
-}
-
-// NOTE: Not idempotent! This calls [sharedData_ advance:].
-- (void)appendRunsWithGlyphsToArray:(NSMutableArray *)newRuns {
-    [sharedData_ advance:range_.length];
-    [newRuns addObject:self];
-    if (runType_ == kCharacterRunSingleCharWithCombiningMarks) {
-        // These don't actually need glyphs. This algorithm is incompatible
-        // with surrogate pairs (they have expected 0-valued glyphs), so it
-        // must never be used in this case. Anyway, it's useless because
-        // CoreText can't render combining marks sanely.
-        return;
-    }
-
-    // This algorithm works by trying to convert a whole run into glyphs. If a bad glyph is found,
-    // the current run is split before and after the bad glyph. The bad glyph will be set to type
-    // kCharacterRunSingleCharWithCombiningMarks and left for NSAttributedString to deal with.
-    //
-    // Example (numbers are valid glyphs, letters are errors):
-    // 12a34bc5d
-    // [12,a34bc5d]
-    // [12,a,34bc5d]
-    // [12,a,34,bc5d]
-    // [12,a,34,b,c5d]
-    // [12,a,34,b,c,5d]
-    // [12,a,34,b,c,5,d]
-    //
-    // In the while loop, the invariant is maintained that currentRun always equals the last glyph
-    // in the newRuns array.
-    BOOL isOk = CTFontGetGlyphsForCharacters((CTFontRef)fontInfo_.font,
-                                             [self codes],
-                                             [self glyphs],
-                                             range_.length);
-    CharacterRun *currentRun = self;
-    while (!isOk) {
-        // As long as this loop is running there are bogus glyphs in the current
-        // run. We split the prefix of good glyphs off and then split the suffix
-        // after the bad glyph off, isolating it.
-        //
-        // A faster algorithm would be possible if the font substitution
-        // algorithm were a bit smarter, but sometimes it goes down dead ends
-        // so the only way to make sure that it can render the max number of
-        // glyphs in a string is to substitute fonts for one glyph at a time.
-        //
-        // Example: given "U+239c U+23b7" in AndaleMono, the font substitution
-        // algorithm suggests HiraganoKaguGothicProN, which cannot render both
-        // glyphs. Ask it one at a time and you get Apple Symbols, which can
-        // render both.
-        int i = [currentRun indexOfFirstMissingGlyph];
-        while (i >= 0) {
-            if (i == 0) {
-                // The first glyph is bad. Truncate the current run to 1
-                // glyph and convert it to a
-                // kCharacterRunSingleCharWithCombiningMarks (though it's
-                // obviously only one code point, it uses NSAttributedString to
-                // render which is slow but can find the right font).
-                CharacterRun *suffixRun = [currentRun splitBeforeIndex:1];
-                currentRun.runType = kCharacterRunSingleCharWithCombiningMarks;
-
-                if (suffixRun.range.length > 0) {
-                    // Append the remainder of the original run to the array of
-                    // runs and have the outer loop begin working on the suffix.
-                    [newRuns addObject:suffixRun];
-                    currentRun = suffixRun;
-                    // break to try getting glyphs again.
-                    break;
-                } else {
-                    // This was the last glyph.
-                    return;
+    int characterIndex = firstCharacterIndex;
+    int indexOfFirstGlyphInCurrentCell = 0;
+    CGFloat basePosition = 0;  // X coord of the current cell relative to the start of this CTRun.
+    int numChars = 0;
+    CGFloat width = 0;
+    for (int glyphIndex = 0; glyphIndex < glyphCount; glyphIndex++) {
+        if (glyphIndex == 0 || indices[glyphIndex] != characterIndex) {
+            // This glyph is for a new character in string_.
+            // Some characters, such as THAI CHARACTER SARA AM, are composed of
+            // multiple glyphs, which is why this if statement's condition
+            // isn't always true.
+            if (advances_[characterIndex] > 0) {
+                if (glyphIndex > 0) {
+                    // Advance to the next cell.
+                    basePosition += advances_[characterIndex];
                 }
-            } else if (i > 0) {
-                // Some glyph after the first is bad. Truncate the current
-                // run to just the good glyphs. Set the currentRun to the
-                // second half. This allows us to have a long run of type kCharacterRunMultipleSimpleChars.
-                currentRun = [currentRun splitBeforeIndex:i];
-                [newRuns addObject:currentRun];
-                // Now currentRun has a bad first glyph.
+                indexOfFirstGlyphInCurrentCell = glyphIndex;
+                width += advances_[characterIndex];
             }
-
-            i = [currentRun indexOfFirstMissingGlyph];
+            characterIndex = indices[glyphIndex];
+            ++numChars;
         }
-        if (i >= 0) {
-            isOk = CTFontGetGlyphsForCharacters((CTFontRef)currentRun.fontInfo.font,
-                                                [currentRun codes],
-                                                [currentRun glyphs],
-                                                currentRun.range.length);
-        }
+        CGFloat x = basePosition + suggestedPositions[glyphIndex].x - suggestedPositions[indexOfFirstGlyphInCurrentCell].x;
+        positions[glyphIndex] = NSMakePoint(x, suggestedPositions[glyphIndex].y);
     }
+    *runWidthPtr = width;
+    return numChars;
 }
 
-- (NSArray *)runsWithGlyphs
-{
-    NSMutableArray *newRuns = [NSMutableArray array];
-    [self appendRunsWithGlyphsToArray:newRuns];
-    return newRuns;
+- (NSString *)description {
+    return [string_ description];
+}
+
+- (CTLineRef)newLine {
+    return CTLineCreateWithAttributedString((CFAttributedStringRef) [[string_ copy] autorelease]);
 }
 
 - (BOOL)isCompatibleWith:(CharacterRun *)otherRun {
-    return (otherRun.runType != kCharacterRunSingleCharWithCombiningMarks &&
-            runType_ != kCharacterRunSingleCharWithCombiningMarks &&
-            fontInfo_ == otherRun.fontInfo &&
+    return (antiAlias_ == otherRun.antiAlias &&
             color_ == otherRun.color &&
             fakeBold_ == otherRun.fakeBold &&
-            antiAlias_ == otherRun.antiAlias);
+            fontInfo_ == otherRun.fontInfo &&
+            advancedFontRendering_ == otherRun.advancedFontRendering);
 }
 
-- (void)appendAdvance:(CGFloat)width {
-    sharedData_.advances[range_.location + range_.length] = CGSizeMake(width, 0);
+- (NSDictionary *)attributes {
+    NSMutableDictionary *dict = [NSMutableDictionary dictionary];
+    [dict setObject:fontInfo_.font forKey:NSFontAttributeName];
+    if (antiAlias_ && advancedFontRendering_) {
+        double strokeThickness = [[PreferencePanel sharedInstance] strokeThickness];
+        [dict setObject:[NSNumber numberWithDouble:strokeThickness] forKey:NSStrokeWidthAttributeName];
+    }
+    [dict setObject:color_ forKey:NSForegroundColorAttributeName];
+    // Turn off all ligatures
+    [dict setObject:[NSNumber numberWithInt:0] forKey:NSLigatureAttributeName];
+    return dict;
+}
+
+- (NSAttributedString *)attributedStringForString:(NSString *)string {
+    return [[[NSAttributedString alloc] initWithString:string attributes:[self attributes]] autorelease];
+}
+
+- (void)appendToAdvances:(float)advance {
+    if (advancesSize_ + 1 >= advancesCapacity_) {
+        advancesCapacity_ = (advancesSize_ + 1) * 2;
+        advances_ = realloc(advances_, advancesCapacity_ * sizeof(float));
+    }
+    advances_[advancesSize_++] = advance;
 }
 
 - (void)appendCode:(unichar)code withAdvance:(CGFloat)advance {
-    sharedData_.codes[range_.location + range_.length] = code;
-    [sharedData_ reserve:1];
-    [self appendAdvance:advance];
-    ++range_.length;
+    if (tempCount_ == kCharacterRunTempSize) {
+        [self commit];
+    }
+    temp_[tempCount_++] = code;
+    [self appendToAdvances:advance];
+}
+
+- (void)commit {
+    if (tempCount_) {
+        [string_ appendAttributedString:[self attributedStringForString:[NSString stringWithCharacters:temp_ length:tempCount_]]];
+        tempCount_ = 0;
+    }
 }
 
 - (void)appendCodesFromString:(NSString *)string withAdvance:(CGFloat)advance {
-    int length = [string length];
-    [sharedData_ reserve:length];
-    [string getCharacters:[self codes]
-                    range:NSMakeRange(0, length)];
-    [self appendAdvance:advance];
-    range_.length += length;
+    [self commit];
+    for (int i = 1; i < [string length]; i++) {
+        [self appendToAdvances:0];
+    }
+    [self appendToAdvances:advance];
+    [string_ appendAttributedString:[self attributedStringForString:string]];
+}
+
+- (void)setAntiAlias:(BOOL)antiAlias {
+    [self commit];
+    antiAlias_ = antiAlias;
+}
+
+- (void)setColor:(NSColor *)color {
+    [self commit];
+    [color_ autorelease];
+    color_ = [color retain];
+}
+
+- (void)setFontInfo:(PTYFontInfo *)fontInfo {
+    [self commit];
+    [fontInfo_ autorelease];
+    fontInfo_ = [fontInfo retain];
 }
 
 @end

@@ -11,6 +11,7 @@
 #import "PSMTabStyle.h"
 #import "PSMProgressIndicator.h"
 #import "PSMTabDragAssistant.h"
+#import "FutureMethods.h"
 
 @interface PSMTabBarControl (Private)
 - (void)update;
@@ -88,6 +89,12 @@
     if (_tabColor)
         [_tabColor release];
     [super dealloc];
+}
+
+// we don't want this to be the first responder in the chain
+- (BOOL)acceptsFirstResponder
+{
+  return NO;
 }
 
 #pragma mark -
@@ -376,7 +383,7 @@
     //NSRect cellFrame = [self frame];
 
     [_controlView lockFocus];
-    NSBitmapImageRep *rep = [[NSBitmapImageRep alloc] initWithFocusedViewRect:cellFrame];
+    NSBitmapImageRep *rep = [[[NSBitmapImageRep alloc] initWithFocusedViewRect:cellFrame] autorelease];
     [_controlView unlockFocus];
     NSImage *image = [[[NSImage alloc] initWithSize:[rep size]] autorelease];
     [image addRepresentation:rep];
@@ -451,11 +458,26 @@
     return NO;
 }
 
+- (NSArray*)accessibilityAttributeNames
+{
+    static NSArray *attributes = nil;
+    if (!attributes) {
+        NSSet *set = [NSSet setWithArray:[super accessibilityAttributeNames]];
+        set = [set setByAddingObjectsFromArray:[NSArray arrayWithObjects:
+                                                   NSAccessibilityTitleAttribute,
+                                                   NSAccessibilityValueAttribute,
+                                                   nil]];
+        attributes = [[set allObjects] retain];
+    }
+    return attributes;
+}
+
+
 - (id)accessibilityAttributeValue:(NSString *)attribute {
     id attributeValue = nil;
 
     if ([attribute isEqualToString: NSAccessibilityRoleAttribute]) {
-        attributeValue = NSAccessibilityButtonRole;
+        attributeValue = NSAccessibilityRadioButtonRole;
     } else if ([attribute isEqualToString: NSAccessibilityHelpAttribute]) {
         if ([[[self controlView] delegate] respondsToSelector:@selector(accessibilityStringForTabView:objectCount:)]) {
             attributeValue = [NSString stringWithFormat:@"%@, %i %@", [self stringValue],
@@ -464,7 +486,18 @@
         } else {
             attributeValue = [self stringValue];
         }
-    } else if ([attribute isEqualToString: NSAccessibilityFocusedAttribute]) {
+    } else if ([attribute isEqualToString:NSAccessibilityPositionAttribute] || [attribute isEqualToString:NSAccessibilitySizeAttribute]) {
+        NSRect rect = [self frame];
+        rect = [[self controlView] convertRect:rect toView:nil];
+        rect = [[self controlView] futureConvertRectToScreen:rect];
+        if ([attribute isEqualToString:NSAccessibilityPositionAttribute]) {
+            attributeValue = [NSValue valueWithPoint:rect.origin];
+        } else {
+            attributeValue = [NSValue valueWithSize:rect.size];
+        }
+    } else if ([attribute isEqualToString:NSAccessibilityTitleAttribute]) {
+        attributeValue = [self stringValue];
+    } else if ([attribute isEqualToString: NSAccessibilityValueAttribute]) {
         attributeValue = [NSNumber numberWithBool:([self tabState] == 2)];
     } else {
         attributeValue = [super accessibilityAttributeValue:attribute];

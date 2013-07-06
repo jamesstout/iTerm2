@@ -52,6 +52,10 @@
 #import "TmuxLayoutParser.h"
 #import "MovePaneController.h"
 #import "TmuxStateParser.h"
+#import "PasteContext.h"
+#import "PasteEvent.h"
+#import "PasteViewController.h"
+#import "TmuxWindowOpener.h"
 #include <stdlib.h>
 #include <unistd.h>
 #include <sys/wait.h>
@@ -61,18 +65,6 @@
 #define DEBUG_METHOD_TRACE    0
 #define DEBUG_KEYDOWNDUMP     0
 #define ASK_ABOUT_OUTDATED_FORMAT @"AskAboutOutdatedKeyMappingForGuid%@"
-
-#define TMUX_VERBOSE_LOGGING
-#ifdef TMUX_VERBOSE_LOGGING
-#define TmuxLog NSLog
-#else
-#define TmuxLog(args...) \
-do { \
-if (gDebugLogging) { \
-DebugLog([NSString stringWithFormat:args]); \
-} \
-} while (0)
-#endif
 
 @implementation PTYSession
 
@@ -112,7 +104,10 @@ static NSString *kTmuxFontChanged = @"kTmuxFontChanged";
     savedScrollPosition_ = -1;
     updateTimer = nil;
     antiIdleTimer = nil;
-    addressBookEntry=nil;
+    addressBookEntry = nil;
+    windowTitleStack = nil;
+    iconTitleStack = nil;
+    eventQueue_ = [[NSMutableArray alloc] init];
 
 #if DEBUG_ALLOC
     NSLog(@"%s: 0x%x", __PRETTY_FUNCTION__, self);
@@ -170,7 +165,10 @@ static NSString *kTmuxFontChanged = @"kTmuxFontChanged";
     [COLORFGBG_VALUE release];
     [name release];
     [windowTitle release];
+    [windowTitleStack release];
+    [iconTitleStack release];
     [addressBookEntry release];
+    [eventQueue_ release];
     [backgroundImagePath release];
     [antiIdleTimer invalidate];
     [antiIdleTimer release];
@@ -180,7 +178,9 @@ static NSString *kTmuxFontChanged = @"kTmuxFontChanged";
     [liveSession_ release];
     [tmuxGateway_ release];
     [tmuxController_ release];
-
+    [sendModifiers_ release];
+    [pasteViewController_ release];
+    [pasteContext_ release];
     [SHELL release];
     SHELL = nil;
     [SCREEN release];
@@ -374,10 +374,9 @@ static NSString *kTmuxFontChanged = @"kTmuxFontChanged";
     }
     if (state) {
         [[aSession SCREEN] setTmuxState:state];
-		NSString *pendingOutput = [state objectForKey:@"pending_output"];
+        NSData *pendingOutput = [state objectForKey:kTmuxWindowOpenerStatePendingOutput];
         if (pendingOutput && [pendingOutput length]) {
-            NSData *data = [pendingOutput dataFromHexValues];
-            [[aSession TERMINAL] putStreamData:data];
+            [[aSession TERMINAL] putStreamData:pendingOutput];
         }
         [[aSession TERMINAL] setInsertMode:[[state objectForKey:kStateDictInsertMode] boolValue]];
         [[aSession TERMINAL] setCursorMode:[[state objectForKey:kStateDictKCursorMode] boolValue]];
@@ -683,7 +682,7 @@ static NSString *kTmuxFontChanged = @"kTmuxFontChanged";
 }
 
 - (BOOL)shouldSetCtype {
-    return [[NSUserDefaults standardUserDefaults] boolForKey:@"SetCtype"];
+    return ![[NSUserDefaults standardUserDefaults] boolForKey:@"DoNotSetCtype"];
 }
 
 - (void)startProgram:(NSString *)program
@@ -710,15 +709,21 @@ static NSString *kTmuxFontChanged = @"kTmuxFontChanged";
     if ([env objectForKey:COLORFGBG_ENVNAME] == nil && COLORFGBG_VALUE != nil)
         [env setObject:COLORFGBG_VALUE forKey:COLORFGBG_ENVNAME];
 
-    NSString* lang = [self _lang];
+    DLog(@"Begin locale logic");
     if (![addressBookEntry objectForKey:KEY_SET_LOCALE_VARS] ||
         [[addressBookEntry objectForKey:KEY_SET_LOCALE_VARS] boolValue]) {
+        DLog(@"Setting locale vars...");
+        NSString* lang = [self _lang];
         if (lang) {
+            DLog(@"set LANG=%@", lang);
             [env setObject:lang forKey:@"LANG"];
         } else if ([self shouldSetCtype]){
+            DLog(@"should set ctype...");
             // Try just the encoding by itself, which might work.
             NSString *encName = [self encodingName];
+            DLog(@"See if encoding %@ is supported...", encName);
             if (encName && [self _localeIsSupported:encName]) {
+                DLog(@"Set LC_CTYPE=%@", encName);
                 [env setObject:encName forKey:@"LC_CTYPE"];
             }
         }
@@ -852,6 +857,7 @@ static NSString *kTmuxFontChanged = @"kTmuxFontChanged";
     if (slowPasteTimer) {
         [slowPasteTimer invalidate];
         slowPasteTimer = nil;
+        [eventQueue_ removeAllObjects];
     }
 
     tab_ = nil;
@@ -915,7 +921,7 @@ static NSString *kTmuxFontChanged = @"kTmuxFontChanged";
                                        alternateButton:@"Cancel"
                                            otherButton:nil
                              informativeTextWithFormat:@""];
-        NSTextField *tmuxCommand = [[NSTextField alloc] initWithFrame:NSMakeRect(0, 0, 200, 24)];
+        NSTextField *tmuxCommand = [[[NSTextField alloc] initWithFrame:NSMakeRect(0, 0, 200, 24)] autorelease];
         [tmuxCommand setEditable:YES];
         [tmuxCommand setSelectable:YES];
         [alert setAccessoryView:tmuxCommand];
@@ -1748,10 +1754,10 @@ static NSString *kTmuxFontChanged = @"kTmuxFontChanged";
             if (data != nil) {
                 send_str = (unsigned char *)[data bytes];
                 send_strlen = [data length];
-                DebugLog([NSString stringWithFormat:@"modflag = 0x%x; send_strlen = %d; send_str[0] = '%c (0x%x)'",
-                          modflag, send_strlen, send_str[0]]);
+                DebugLog([NSString stringWithFormat:@"modflag = 0x%x; send_strlen = %zd; send_str[0] = '%c (0x%x)'",
+                          modflag, send_strlen, send_str[0], send_str[0]]);
                 if (debugKeyDown) {
-                    DebugLog([NSString stringWithFormat:@"modflag = 0x%x; send_strlen = %d; send_str[0] = '%c (0x%x)'",
+                    DebugLog([NSString stringWithFormat:@"modflag = 0x%x; send_strlen = %zd; send_str[0] = '%c (0x%x)'",
                               modflag, send_strlen, send_str[0], send_str[0]]);
                 }
             }
@@ -1937,6 +1943,22 @@ static NSString *kTmuxFontChanged = @"kTmuxFontChanged";
     [self writeTask:[TERMINAL keyPageDown:0]];
 }
 
+- (void)emptyEventQueue {
+    int eventsSent = 0;
+    for (NSEvent *event in eventQueue_) {
+        ++eventsSent;
+        if ([event isKindOfClass:[PasteEvent class]]) {
+            PasteEvent *pasteEvent = (PasteEvent *)event;
+            [self pasteString:pasteEvent.string flags:pasteEvent.flags];
+            // Can't empty while pasting.
+            break;
+        } else {
+            [TEXTVIEW keyDown:event];
+        }
+    }
+    [eventQueue_ removeObjectsInRange:NSMakeRange(0, eventsSent)];
+}
+
 + (NSString*)pasteboardString
 {
     NSPasteboard *board;
@@ -1966,39 +1988,70 @@ static NSString *kTmuxFontChanged = @"kTmuxFontChanged";
     return info;
 }
 
+- (void)showPasteUI {
+    pasteViewController_ = [[PasteViewController alloc] initWithContext:pasteContext_
+                                                                 length:slowPasteBuffer.length];
+    pasteViewController_.delegate = self;
+    pasteViewController_.view.frame = NSMakeRect(20,
+                                                 view.frame.size.height - pasteViewController_.view.frame.size.height,
+                                                 pasteViewController_.view.frame.size.width,
+                                                 pasteViewController_.view.frame.size.height);
+    [view addSubview:pasteViewController_.view];
+    [pasteViewController_ updateFrame];
+}
+
+- (void)hidePasteUI {
+    [pasteViewController_ close];
+    [pasteViewController_ release];
+    pasteViewController_ = nil;
+}
+
+- (void)updatePasteUI {
+    [pasteViewController_ setRemainingLength:slowPasteBuffer.length];
+}
+
+- (NSData *)dataByRemovingControlCodes:(NSData *)data {
+    NSMutableData *output = [NSMutableData dataWithCapacity:[data length]];
+    const unsigned char *p = data.bytes;
+    int start = 0;
+    int i = 0;
+    for (i = 0; i < data.length; i++) {
+        if (p[i] < ' ' && p[i] != '\n' && p[i] != '\r' && p[i] != '\t' && p[i] != 12) {
+            if (i > start) {
+                [output appendBytes:p + start length:i - start];
+            }
+            start = i + 1;
+        }
+    }
+    if (i > start) {
+        [output appendBytes:p + start length:i - start];
+    }
+    return output;
+}
 
 - (void)_pasteStringImmediately:(NSString*)aString
 {
     if ([aString length] > 0) {
-        [self writeTask:[aString
-                         dataUsingEncoding:[TERMINAL encoding]
-                         allowLossyConversion:YES]];
+        NSData *data = [aString dataUsingEncoding:[TERMINAL encoding]
+                             allowLossyConversion:YES];
+        NSData *safeData = [self dataByRemovingControlCodes:data];
+        [self writeTask:safeData];
 
     }
 }
 
-- (void)_pasteWithBytePerCallPrefKey:(NSString*)bytesPerCallKey
-                        defaultValue:(int)bytesPerCallDefault
-            delayBetweenCallsPrefKey:(NSString*)delayBetweenCallsKey
-                        defaultValue:(float)delayBetweenCallsDefault
-                            selector:(SEL)selector
-{
+- (void)pasteAgain {
     NSRange range;
     range.location = 0;
-    NSNumber* pref = [[NSUserDefaults standardUserDefaults] valueForKey:bytesPerCallKey];
-    NSNumber* delay = [[NSUserDefaults standardUserDefaults] valueForKey:delayBetweenCallsKey];
-    const int kBatchSize = pref ? [pref intValue] : bytesPerCallDefault;
-    if ([slowPasteBuffer length] > kBatchSize) {
-        range.length = kBatchSize;
-    } else {
-        range.length = [slowPasteBuffer length];
-    }
+    range.length = MIN(pasteContext_.bytesPerCall, [slowPasteBuffer length]);
     [self _pasteStringImmediately:[slowPasteBuffer substringWithRange:range]];
     [slowPasteBuffer deleteCharactersInRange:range];
+    [self updatePasteUI];
     if ([slowPasteBuffer length] > 0) {
-        slowPasteTimer = [NSTimer scheduledTimerWithTimeInterval:delay ? [delay floatValue] : delayBetweenCallsDefault
+        [pasteContext_ updateValues];
+        slowPasteTimer = [NSTimer scheduledTimerWithTimeInterval:pasteContext_.delayBetweenCalls
                                                           target:self
-                                                        selector:selector
+                                                        selector:@selector(pasteAgain)
                                                         userInfo:nil
                                                          repeats:NO];
     } else {
@@ -2008,7 +2061,29 @@ static NSString *kTmuxFontChanged = @"kTmuxFontChanged";
                              allowLossyConversion:YES]];
         }
         slowPasteTimer = nil;
+        [self hidePasteUI];
+        [pasteContext_ release];
+        pasteContext_ = nil;
+        [self emptyEventQueue];
     }
+}
+
+- (void)_pasteWithBytePerCallPrefKey:(NSString*)bytesPerCallKey
+                        defaultValue:(int)bytesPerCallDefault
+            delayBetweenCallsPrefKey:(NSString*)delayBetweenCallsKey
+                        defaultValue:(float)delayBetweenCallsDefault
+{
+    [pasteContext_ release];
+    pasteContext_ = [[PasteContext alloc] initWithBytesPerCallPrefKey:bytesPerCallKey
+                                                         defaultValue:bytesPerCallDefault
+                                             delayBetweenCallsPrefKey:delayBetweenCallsKey
+                                                         defaultValue:delayBetweenCallsDefault];
+    const int kPasteBytesPerSecond = 10000;  // This is a wild-ass guess.
+    if (pasteContext_.delayBetweenCalls * slowPasteBuffer.length / pasteContext_.bytesPerCall + slowPasteBuffer.length / kPasteBytesPerSecond > 3) {
+        [self showPasteUI];
+    }
+
+    [self pasteAgain];
 }
 
 // Outputs 16 bytes every 125ms so that clients that don't buffer input can handle pasting large buffers.
@@ -2018,17 +2093,15 @@ static NSString *kTmuxFontChanged = @"kTmuxFontChanged";
     [self _pasteWithBytePerCallPrefKey:@"SlowPasteBytesPerCall"
                           defaultValue:16
               delayBetweenCallsPrefKey:@"SlowPasteDelayBetweenCalls"
-                          defaultValue:0.125
-                              selector:@selector(pasteSlowly:)];
+                          defaultValue:0.125];
 }
 
 - (void)_pasteStringMore
 {
     [self _pasteWithBytePerCallPrefKey:@"QuickPasteBytesPerCall"
-                          defaultValue:256
+                          defaultValue:1024
               delayBetweenCallsPrefKey:@"QuickPasteDelayBetweenCalls"
-                          defaultValue:0.01
-                              selector:@selector(_pasteStringMore)];
+                          defaultValue:0.01];
 }
 
 - (void)_pasteString:(NSString *)aString
@@ -2044,26 +2117,37 @@ static NSString *kTmuxFontChanged = @"kTmuxFontChanged";
     }
 }
 
-- (void)paste:(id)sender
+- (void)pasteString:(NSString *)str flags:(int)flags
 {
+    if (flags & 1) {
+        // paste escaping special characters
+        str = [str stringWithEscapedShellCharacters];
+    }
     if ([TERMINAL bracketedPasteMode]) {
         [self writeTask:[[NSString stringWithFormat:@"%c[200~", 27]
                          dataUsingEncoding:[TERMINAL encoding]
                          allowLossyConversion:YES]];
     }
+    if (flags & 2) {
+        [slowPasteBuffer appendString:[str stringWithLinefeedNewlines]];
+        [self pasteSlowly:nil];
+    } else {
+        [self _pasteString:str];
+    }
+}
 
+- (void)paste:(id)sender
+{
     NSString* pbStr = [PTYSession pasteboardString];
     if (pbStr) {
-        NSString *str = [[[NSMutableString alloc] initWithString:pbStr] autorelease];
-        if ([sender tag] & 1) {
-            // paste escaping special characters
-            str = [str stringWithEscapedShellCharacters];
-        }
-        if ([sender tag] & 2) {
-            [slowPasteBuffer appendString:[str stringWithLinefeedNewlines]];
-            [self pasteSlowly:nil];
+        if ([self isPasting]) {
+            if ([pbStr length] == 0) {
+                NSBeep();
+            } else {
+                [eventQueue_ addObject:[PasteEvent pasteEventWithString:pbStr flags:[sender tag]]];
+            }
         } else {
-            [self _pasteString:str];
+            [self pasteString:pbStr flags:[sender tag]];
         }
     }
 }
@@ -2232,17 +2316,18 @@ static NSString *kTmuxFontChanged = @"kTmuxFontChanged";
     }
     for (i = 0; i < 216; i++) {
         [self setColorTable:i+16
-                      color:[NSColor colorWithCalibratedRed:(i/36) ? ((i/36)*40+55)/256.0 : 0
-                                                      green:(i%36)/6 ? (((i%36)/6)*40+55)/256.0:0
-                                                       blue:(i%6) ?((i%6)*40+55)/256.0:0
+                      color:[NSColor colorWithCalibratedRed:(i/36) ? ((i/36)*40+55)/255.0 : 0
+                                                      green:(i%36)/6 ? (((i%36)/6)*40+55)/255.0:0
+                                                       blue:(i%6) ?((i%6)*40+55)/255.0:0
                                                       alpha:1]];
     }
     for (i = 0; i < 24; i++) {
-        [self setColorTable:i+232 color:[NSColor colorWithCalibratedWhite:(i*10+8)/256.0 alpha:1]];
+        [self setColorTable:i+232 color:[NSColor colorWithCalibratedWhite:(i*10+8)/255.0 alpha:1]];
     }
 
     // background image
     [self setBackgroundImagePath:[aDict objectForKey:KEY_BACKGROUND_IMAGE_LOCATION]];
+    [self setBackgroundImageTiled:[[aDict objectForKey:KEY_BACKGROUND_IMAGE_TILED] boolValue]];
 
     // colour scheme
     [self setCOLORFGBG_VALUE:[self ansiColorsMatchingForeground:[aDict objectForKey:KEY_FOREGROUND_COLOR]
@@ -2265,6 +2350,9 @@ static NSString *kTmuxFontChanged = @"kTmuxFontChanged";
         [self setUseBoldFont:YES];
     }
     [TEXTVIEW setUseBrightBold:[aDict objectForKey:KEY_USE_BRIGHT_BOLD] ? [[aDict objectForKey:KEY_USE_BRIGHT_BOLD] boolValue] : YES];
+
+    // italic
+    [self setUseItalicFont:[[aDict objectForKey:KEY_USE_ITALIC_FONT] boolValue]];
 
     // set up the rest of the preferences
     [SCREEN setPlayBellFlag:![[aDict objectForKey:KEY_SILENCE_BELL] boolValue]];
@@ -2312,6 +2400,8 @@ static NSString *kTmuxFontChanged = @"kTmuxFontChanged";
     [self setDoubleWidth:[[aDict objectForKey:KEY_AMBIGUOUS_DOUBLE_WIDTH] boolValue]];
     [self setXtermMouseReporting:[[aDict objectForKey:KEY_XTERM_MOUSE_REPORTING] boolValue]];
     [TERMINAL setDisableSmcupRmcup:[[aDict objectForKey:KEY_DISABLE_SMCUP_RMCUP] boolValue]];
+    [SCREEN setAllowTitleReporting:[[aDict objectForKey:KEY_ALLOW_TITLE_REPORTING] boolValue]];
+    [TERMINAL setUseCanonicalParser:[[aDict objectForKey:KEY_USE_CANONICAL_PARSER] boolValue]];
     [SCREEN setUnlimitedScrollback:[[aDict objectForKey:KEY_UNLIMITED_SCROLLBACK] intValue]];
     [SCREEN setScrollback:[[aDict objectForKey:KEY_SCROLLBACK_LINES] intValue]];
 
@@ -2345,7 +2435,7 @@ static NSString *kTmuxFontChanged = @"kTmuxFontChanged";
 
 - (NSString*)formattedName:(NSString*)base
 {
-    NSString *prefix = tmuxController_ ? @"↣ " : @"";
+    NSString *prefix = tmuxController_ ? [NSString stringWithFormat:@"↣ %@: ", [[self tab] tmuxWindowName]] : @"";
 
     BOOL baseIsBookmarkName = [base isEqualToString:bookmarkName];
     PreferencePanel* panel = [PreferencePanel sharedInstance];
@@ -2448,6 +2538,10 @@ static NSString *kTmuxFontChanged = @"kTmuxFontChanged";
     return growlNewOutput;
 }
 
+- (NSString *)windowName {
+    return [[[self tab] realParentWindow] currentSessionName];
+}
+
 - (NSString*)name
 {
     return [self formattedName:name];
@@ -2532,6 +2626,58 @@ static NSString *kTmuxFontChanged = @"kTmuxFontChanged";
     }
 }
 
+- (void)pushWindowTitle
+{
+    if (!windowTitleStack) {
+        // initialize lazily
+        windowTitleStack = [[NSMutableArray alloc] init];
+    }
+    NSString *title = windowTitle;
+    if (!title) {
+        // if current title is nil, treat it as an empty string.
+        title = @"";
+    }
+    // push it
+    [windowTitleStack addObject:title];
+}
+
+- (void)popWindowTitle
+{
+    // Ignore if title stack is nil or stack count == 0
+    NSUInteger count = [windowTitleStack count];
+    if (count > 0) {
+        // pop window title
+        [self setWindowTitle:[windowTitleStack objectAtIndex:count - 1]];
+        [windowTitleStack removeObjectAtIndex:count - 1];
+    }
+}
+
+- (void)pushIconTitle
+{
+    if (!iconTitleStack) {
+        // initialize lazily
+        iconTitleStack = [[NSMutableArray alloc] init];
+    }
+    NSString *title = name;
+    if (!title) {
+        // if current icon title is nil, treat it as an empty string.
+        title = @"";
+    }
+    // push it
+    [iconTitleStack addObject:title];
+}
+
+- (void)popIconTitle
+{
+    // Ignore if icon title stack is nil or stack count == 0.
+    NSUInteger count = [iconTitleStack count];
+    if (count > 0) {
+        // pop icon title
+        [self setName:[iconTitleStack objectAtIndex:count - 1]];
+        [iconTitleStack removeObjectAtIndex:count - 1];
+    }
+}
+
 - (PTYTask *)SHELL
 {
     return SHELL;
@@ -2586,11 +2732,6 @@ static NSString *kTmuxFontChanged = @"kTmuxFontChanged";
 {
     [SCREEN autorelease];
     SCREEN = [theSCREEN retain];
-}
-
-- (NSImage *)image
-{
-    return [SCROLLVIEW backgroundImage];
 }
 
 - (SessionView *)view
@@ -2652,6 +2793,17 @@ static NSString *kTmuxFontChanged = @"kTmuxFontChanged";
     return [TEXTVIEW content];
 }
 
+- (BOOL)backgroundImageTiled
+{
+    return backgroundImageTiled;
+}
+
+- (void)setBackgroundImageTiled:(BOOL)set
+{
+    backgroundImageTiled = set;
+    [self setBackgroundImagePath:backgroundImagePath];
+}
+
 - (NSString *)backgroundImagePath
 {
     return backgroundImagePath;
@@ -2675,7 +2827,7 @@ static NSString *kTmuxFontChanged = @"kTmuxFontChanged";
         NSImage *anImage = [[NSImage alloc] initWithContentsOfFile:backgroundImagePath];
         if (anImage != nil) {
             [SCROLLVIEW setDrawsBackground:NO];
-            [SCROLLVIEW setBackgroundImage:anImage];
+            [SCROLLVIEW setBackgroundImage:anImage asPattern:[self backgroundImageTiled]];
             [anImage release];
         } else {
             [SCROLLVIEW setDrawsBackground:YES];
@@ -2878,6 +3030,16 @@ static NSString *kTmuxFontChanged = @"kTmuxFontChanged";
     [TEXTVIEW setUseBoldFont:boldFlag];
 }
 
+- (BOOL)useItalicFont
+{
+    return [TEXTVIEW useItalicFont];
+}
+
+- (void)setUseItalicFont:(BOOL)italicFlag
+{
+    [TEXTVIEW setUseItalicFont:italicFlag];
+}
+
 - (BOOL)doubleWidth
 {
     return doubleWidth;
@@ -2886,6 +3048,7 @@ static NSString *kTmuxFontChanged = @"kTmuxFontChanged";
 - (void)setDoubleWidth:(BOOL)set
 {
     doubleWidth = set;
+    tmuxController_.ambiguousIsDoubleWidth = set;
 }
 
 - (BOOL)xtermMouseReporting
@@ -2896,7 +3059,7 @@ static NSString *kTmuxFontChanged = @"kTmuxFontChanged";
 - (void)setXtermMouseReporting:(BOOL)set
 {
     xtermMouseReporting = set;
-	[TEXTVIEW updateCursor:[NSApp currentEvent]];
+    [TEXTVIEW updateCursor:[NSApp currentEvent]];
 }
 
 - (BOOL)logging
@@ -2987,6 +3150,16 @@ static NSString *kTmuxFontChanged = @"kTmuxFontChanged";
     return [rightOptPref intValue];
 }
 
+- (void)setSendModifiers:(NSArray *)sendModifiers {
+    [sendModifiers_ autorelease];
+    sendModifiers_ = [sendModifiers retain];
+    // TODO(georgen): Actually use this. It's not well documented and the xterm code is a crazy mess :(.
+    // For future reference, in tmux commit 8df3ec612a8c496fc2c975b8241f4e95faef5715 the list of xterm
+    // keys gives a hint about how this is supposed to work (e.g., control-! sends a long CSI code). See also
+    // the xterm manual (look for modifyOtherKeys, etc.) for valid values, and ctlseqs.html on invisible-island
+    // for the meaning of the indices (under CSI > Ps; Pm m).
+}
+
 - (void)setAddressBookEntry:(NSDictionary*)entry
 {
     NSMutableDictionary *dict = [[entry mutableCopy] autorelease];
@@ -3017,6 +3190,14 @@ static NSString *kTmuxFontChanged = @"kTmuxFontChanged";
 - (iTermGrowlDelegate*)growlDelegate
 {
     return gd;
+}
+
+- (BOOL)isPasting {
+    return slowPasteTimer != nil;
+}
+
+- (void)queueKeyDown:(NSEvent *)event {
+    [eventQueue_ addObject:event];
 }
 
 - (void)sendCommand:(NSString *)command
@@ -3248,7 +3429,11 @@ static long long timeInTenthsOfSeconds(struct timeval t)
     }
     // If the window isn't able to adjust, or adjust enough, make the session
     // work with whatever size we ended up having.
-    [[self tab] fitSessionToCurrentViewSize:self];
+    if ([self isTmuxClient]) {
+        [tmuxController_ windowDidResize:[[self tab] realParentWindow]];
+    } else {
+        [[self tab] fitSessionToCurrentViewSize:self];
+    }
 }
 
 - (void)synchronizeTmuxFonts:(NSNotification *)notification
@@ -3636,11 +3821,12 @@ static long long timeInTenthsOfSeconds(struct timeval t)
     tmuxMode_ = TMUX_GATEWAY;
     tmuxGateway_ = [[TmuxGateway alloc] initWithDelegate:self];
     tmuxController_ = [[TmuxController alloc] initWithGateway:tmuxGateway_];
-	NSSize theSize;
-	Profile *tmuxBookmark = [PTYTab tmuxBookmark];
-	theSize.width = [[tmuxBookmark objectForKey:KEY_COLUMNS] intValue];
-	theSize.height = [[tmuxBookmark objectForKey:KEY_ROWS] intValue];
-	[tmuxController_ setClientSize:theSize];
+    tmuxController_.ambiguousIsDoubleWidth = doubleWidth;
+    NSSize theSize;
+    Profile *tmuxBookmark = [PTYTab tmuxBookmark];
+    theSize.width = MAX(1, [[tmuxBookmark objectForKey:KEY_COLUMNS] intValue]);
+    theSize.height = MAX(1, [[tmuxBookmark objectForKey:KEY_ROWS] intValue]);
+    [tmuxController_ setClientSize:theSize];
 
     [self printTmuxMessage:@"** tmux mode started **"];
     [SCREEN crlf];
@@ -3752,6 +3938,10 @@ static long long timeInTenthsOfSeconds(struct timeval t)
 
 - (void)tmuxWindowRenamedWithId:(int)windowId to:(NSString *)newName
 {
+    PTYTab *tab = [tmuxController_ window:windowId];
+    if (tab) {
+        [tab setTmuxWindowName:newName];
+    }
     [tmuxController_ windowWasRenamedWithId:windowId to:newName];
 }
 
@@ -3786,9 +3976,9 @@ static long long timeInTenthsOfSeconds(struct timeval t)
         return;
     }
     if (tmuxSecureLogging_) {
-        TmuxLog(@"Write to tmux.");
+        DLog(@"Write to tmux.");
     } else {
-        TmuxLog(@"Write to tmux: \"%@\"", [[[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding] autorelease]);
+        DLog(@"Write to tmux: \"%@\"", [[[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding] autorelease]);
     }
     if (tmuxLogging_) {
         [self printTmuxMessage:[[[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding] autorelease]];
@@ -3816,9 +4006,9 @@ static long long timeInTenthsOfSeconds(struct timeval t)
     [tmuxController_ windowsChanged];
 }
 
-- (void)tmuxSessionRenamed:(NSString *)newName
+- (void)tmuxSession:(int)sessionId renamed:(NSString *)newName
 {
-    [tmuxController_ sessionRenamedTo:newName];
+    [tmuxController_ session:sessionId renamedTo:newName];
 }
 
 - (NSSize)tmuxBookmarkSize
@@ -3837,6 +4027,16 @@ static long long timeInTenthsOfSeconds(struct timeval t)
 	} else {
 		return [[dict objectForKey:KEY_SCROLLBACK_LINES] intValue];
 	}
+}
+
+- (void)pasteViewControllerDidCancel
+{
+    [self hidePasteUI];
+    [slowPasteTimer invalidate];
+    slowPasteTimer = nil;
+    [slowPasteBuffer release];
+    slowPasteBuffer = [[NSMutableString alloc] init];
+    [self emptyEventQueue];
 }
 
 @end
@@ -3956,7 +4156,7 @@ static long long timeInTenthsOfSeconds(struct timeval t)
     CFStringEncoding cfEncoding = CFStringConvertNSStringEncodingToEncoding([self encoding]);
     // Convert it to the expected (IANA) format.
     NSString* ianaEncoding = (NSString*)CFStringConvertEncodingToIANACharSetName(cfEncoding);
-
+    DLog(@"iana encoding is %@", ianaEncoding);
     // Fix up lowercase letters.
     static NSDictionary* lowerCaseEncodings;
     if (!lowerCaseEncodings) {
@@ -3971,6 +4171,7 @@ static long long timeInTenthsOfSeconds(struct timeval t)
         if (lowerCaseEncodings) {
             if (![lowerCaseEncodings objectForKey:ianaEncoding]) {
                 ianaEncoding = [ianaEncoding uppercaseString];
+                DLog(@"Convert to uppser case. ianaEncoding is now %@", ianaEncoding);
             }
         }
     }
@@ -3980,8 +4181,11 @@ static long long timeInTenthsOfSeconds(struct timeval t)
         NSMutableString* encoding = [[[NSMutableString alloc] initWithString:ianaEncoding] autorelease];
         [encoding replaceOccurrencesOfString:@"ISO-" withString:@"ISO" options:0 range:NSMakeRange(0, [encoding length])];
         [encoding replaceOccurrencesOfString:@"EUC-" withString:@"euc" options:0 range:NSMakeRange(0, [encoding length])];
+        DLog(@"After mangling, encoding is now %@", encoding);
         return encoding;
     }
+
+    DLog(@"Return nil encoding");
 
     return nil;
 }
@@ -3991,10 +4195,14 @@ static long long timeInTenthsOfSeconds(struct timeval t)
     NSString* theLocale = nil;
     NSString* languageCode = [[NSLocale currentLocale] objectForKey:NSLocaleLanguageCode];
     NSString* countryCode = [[NSLocale currentLocale] objectForKey:NSLocaleCountryCode];
+    DLog(@"getLocale: languageCode=%@, countryCode=%@", languageCode, countryCode);
     if (languageCode && countryCode) {
         theLocale = [NSString stringWithFormat:@"%@_%@", languageCode, countryCode];
+        DLog(@"Return combined language/country locale %@", theLocale);
     } else {
-        return [[NSLocale currentLocale] localeIdentifier];
+        NSString *localeId = [[NSLocale currentLocale] localeIdentifier];
+        DLog(@"Return local identifier of %@", localeId);
+        return localeId;
     }
     return theLocale;
 }
@@ -4003,14 +4211,19 @@ static long long timeInTenthsOfSeconds(struct timeval t)
 {
     NSString* theLocale = [self _getLocale];
     NSString* encoding = [self encodingName];
+    DLog(@"locale=%@, encoding=%@", theLocale, encoding);
     if (encoding && theLocale) {
         NSString* result = [NSString stringWithFormat:@"%@.%@", theLocale, encoding];
+        DLog(@"Tentative locale is %@", result);
         if ([self _localeIsSupported:result]) {
+            DLog(@"Locale is supported");
             return result;
         } else {
+            DLog(@"Locale is NOT supported");
             return nil;
         }
     } else {
+        DLog(@"No locale or encoding, returning nil language");
         return nil;
     }
 }

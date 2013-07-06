@@ -32,6 +32,9 @@
 #import "LineBuffer.h"
 #import "DVR.h"
 
+extern NSString * const kHighlightForegroundColor;
+extern NSString * const kHighlightBackgroundColor;
+
 @class PTYTask;
 @class PTYSession;
 @class PTYTextView;
@@ -67,9 +70,9 @@ void StringToScreenChars(NSString *s,
                          screen_char_t fg,
                          screen_char_t bg,
                          int *len,
-                         NSStringEncoding encoding,
                          BOOL ambiguousIsDoubleWidth,
                          int* cursorIndex);
+void TranslateCharacterSet(screen_char_t *s, int len);
 
 @interface VT100Screen : NSObject
 {
@@ -149,6 +152,9 @@ void StringToScreenChars(NSString *s,
     // Used for recording instant replay.
     DVR* dvr;
     BOOL saveToScrollbackInAlternateScreen_;
+
+    BOOL allowTitleReporting_;
+	BOOL allDirty_;  // When true, all cells are dirty. Faster than a big memset.
 }
 
 
@@ -160,6 +166,8 @@ void StringToScreenChars(NSString *s,
 - (screen_char_t*)initScreenWithWidth:(int)width Height:(int)height;
 - (void)resizeWidth:(int)new_width height:(int)height;
 - (void)reset;
+- (void)resetCharset;
+- (BOOL)usingDefaultCharset;
 - (void)setWidth:(int)width height:(int)height;
 - (int)width;
 - (int)height;
@@ -204,6 +212,9 @@ void StringToScreenChars(NSString *s,
 - (void)saveBuffer;
 - (void)restoreBuffer;
 
+- (void)setSendModifiers:(int *)modifiers
+               numValues:(int)numValues;
+
 - (void)mouseModeDidChange:(MouseMode)mouseMode;
 
 // internal
@@ -239,11 +250,12 @@ void StringToScreenChars(NSString *s,
 - (void)scrollUp;
 - (void)scrollDown;
 - (void)activateBell;
-- (void)deviceReport:(VT100TCC)token;
+- (void)deviceReport:(VT100TCC)token withQuestion:(BOOL)question;
 - (void)deviceAttribute:(VT100TCC)token;
-- (void)insertBlank: (int)n;
-- (void)insertLines: (int)n;
-- (void)deleteLines: (int)n;
+- (void)secondaryDeviceAttribute:(VT100TCC)token;
+- (void)insertBlank:(int)n;
+- (void)insertLines:(int)n;
+- (void)deleteLines:(int)n;
 - (void)blink;
 - (int)cursorX;
 - (int)cursorY;
@@ -274,6 +286,8 @@ void StringToScreenChars(NSString *s,
 
 - (void)resetDirty;
 - (void)setDirty;
+- (BOOL)isAllDirty;
+- (void)resetAllDirty;
 
 // print to ansi...
 - (BOOL) printToAnsi;
@@ -314,8 +328,9 @@ void StringToScreenChars(NSString *s,
 - (void)dumpDebugLog;
 
 // Set the colors in the prototype char to all text on screen that matches the regex.
+// See kHighlightXxxColor constants at the top of this file for dict keys, values are NSColor*s.
 - (void)highlightTextMatchingRegex:(NSString *)regex
-                     prototypeChar:(screen_char_t)prototypechar;
+                            colors:(NSDictionary *)colors;
 
 // Return a human-readable dump of the screen contents.
 - (NSString*)debugString;
@@ -344,6 +359,9 @@ void StringToScreenChars(NSString *s,
 
 // Restore the saved position into a passed-in find context (see saveFindContextAbsPos and saveTerminalAbsPos).
 - (void)restoreSavedPositionToFindContext:(FindContext *)context;
+
+// Set whether title reporting is allowed. Defaults to no.
+- (void)setAllowTitleReporting:(BOOL)allow;
 
 @end
 
