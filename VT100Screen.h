@@ -34,6 +34,7 @@
 
 extern NSString * const kHighlightForegroundColor;
 extern NSString * const kHighlightBackgroundColor;
+extern BOOL gExperimentalOptimization;
 
 @class PTYTask;
 @class PTYSession;
@@ -119,9 +120,11 @@ void TranslateCharacterSet(screen_char_t *s, int len);
     screen_char_t *default_line;
     screen_char_t *result_line;
 
-    // temporary buffer to store main buffer in SAVE_BUFFER/RESET_BUFFER mode
-    screen_char_t *temp_buffer;
-    screen_char_t temp_default_char;
+    // temporary buffers to store main/alt screens in SAVE_BUFFER/RESET_BUFFER mode
+    screen_char_t *saved_primary_buffer;
+    screen_char_t *saved_alt_buffer;
+    screen_char_t primary_default_char;
+    BOOL showingAltScreen;
 
     // default line stuff
     screen_char_t default_bg_code;
@@ -166,6 +169,7 @@ void TranslateCharacterSet(screen_char_t *s, int len);
 - (screen_char_t*)initScreenWithWidth:(int)width Height:(int)height;
 - (void)resizeWidth:(int)new_width height:(int)height;
 - (void)reset;
+- (void)resetPreservingPrompt:(BOOL)preservePrompt;
 - (void)resetCharset;
 - (BOOL)usingDefaultCharset;
 - (void)setWidth:(int)width height:(int)height;
@@ -209,8 +213,10 @@ void TranslateCharacterSet(screen_char_t *s, int len);
 - (void)clearBuffer;
 - (long long)absoluteLineNumberOfCursor;
 - (void)clearScrollbackBuffer;
-- (void)saveBuffer;
-- (void)restoreBuffer;
+- (void)savePrimaryBuffer;
+- (void)showPrimaryBuffer;
+- (void)saveAltBuffer;
+- (void)showAltBuffer;
 
 - (void)setSendModifiers:(int *)modifiers
                numValues:(int)numValues;
@@ -274,6 +280,11 @@ void TranslateCharacterSet(screen_char_t *s, int len);
 
 // Set a range of bytes to dirty=1
 - (void)setRangeDirty:(NSRange)range;
+
+// Set the cursor dirty. Cursor coords are different because of how they handle
+// being in the WIDTH'th column (it wraps to the start of the next line)
+// whereas that wouldn't normally be a legal X value.
+- (void)setCharDirtyAtCursorX:(int)x Y:(int)y value:(int)v;
 
 // OR in a value into the dirty array at an x,y coordinate
 - (void)setCharDirtyAtX:(int)x Y:(int)y value:(int)v;
